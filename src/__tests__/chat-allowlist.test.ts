@@ -271,6 +271,18 @@ describe("chat allowlist — ticking and unticking", () => {
   });
 });
 
+describe("file downloads follow the chat rules", () => {
+  it("telegram-download-media is refused for private, unticked and 1:1 chats before any Telegram read", async () => {
+    const list = store();
+    const { call, calls } = register(() => list.forUser("u1"));
+    for (const chatId of ["-100555", "-4001", "@alice"]) {
+      const res = await call("telegram-download-media", { chatId, messageId: 1 });
+      assert.equal(res.isError, true, chatId);
+      assert.deepEqual(calls, ["resolveChat"], chatId);
+    }
+  });
+});
+
 describe("listing limits", () => {
   it("a huge limit is capped before Telegram is asked", async () => {
     const { call, argsOf } = register(() => store().forUser("u1"));

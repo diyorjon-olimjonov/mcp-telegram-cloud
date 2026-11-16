@@ -21,7 +21,9 @@ import { Hono } from "hono";
 
 const { registerAllTools } = await import("../tool-registry.js");
 const { TOOLS } = await import("../tools.js");
-const { DEFAULT_HIDDEN_TOOLS, isToolExposed, parseHiddenTools, parseToolMode } = await import("../tool-policy.js");
+const { DEFAULT_HIDDEN_TOOLS, isToolExposed, parseHiddenTools, parseToolMode, READ_ONLY_EXTRA_TOOLS } = await import(
+  "../tool-policy.js"
+);
 const { createMyRoutes } = await import("../routes/my.js");
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -73,7 +75,13 @@ const READ_ONLY: Policy = { mode: "read-only", hidden: new Set(DEFAULT_HIDDEN_TO
 const FULL: Policy = { mode: "full", hidden: new Set(DEFAULT_HIDDEN_TOOLS) };
 
 const byName = new Map(TOOLS.map((t) => [t.name, t]));
-const writeTool = TOOLS.find((t) => !t.annotations.readOnlyHint && !t.annotations.destructiveHint && !t.requiresEnv);
+const writeTool = TOOLS.find(
+  (t) =>
+    !t.annotations.readOnlyHint &&
+    !t.annotations.destructiveHint &&
+    !t.requiresEnv &&
+    !READ_ONLY_EXTRA_TOOLS.has(t.name),
+);
 const destructiveTool =
   TOOLS.find((t) => t.name === "telegram-delete-messages") ?? TOOLS.find((t) => t.annotations.destructiveHint);
 
@@ -106,7 +114,11 @@ describe("tool policy — read-only mode", () => {
   it("tools/list holds only readOnlyHint=true tools, minus HIDDEN_TOOLS", async () => {
     const { listed, names } = await connect(READ_ONLY);
     assert.ok(listed.length > 30, "read tools are still there");
-    for (const t of listed) assert.equal(t.annotations?.readOnlyHint, true, `${t.name} is not read-only`);
+    for (const t of listed) {
+      if (READ_ONLY_EXTRA_TOOLS.has(t.name)) continue; // file download from readable chats
+      assert.equal(t.annotations?.readOnlyHint, true, `${t.name} is not read-only`);
+    }
+    assert.ok(names.has("telegram-download-media"), "files can be fetched from readable chats");
     for (const h of DEFAULT_HIDDEN_TOOLS) assert.ok(!names.has(h), `${h} must be hidden`);
     assert.ok(names.has("telegram-read-messages"));
     assert.ok(names.has("telegram-list-chats"));
@@ -117,7 +129,10 @@ describe("tool policy — read-only mode", () => {
   it("write and destructive tools are absent and rejected when called by name", async () => {
     assert.ok(writeTool && destructiveTool);
     const { client, names } = await connect(READ_ONLY);
-    for (const t of TOOLS.filter((x) => !x.annotations.readOnlyHint)) assert.ok(!names.has(t.name), t.name);
+    for (const t of TOOLS.filter((x) => !x.annotations.readOnlyHint && !READ_ONLY_EXTRA_TOOLS.has(x.name))) {
+      assert.ok(!names.has(t.name), t.name);
+    }
+    assert.deepEqual([...READ_ONLY_EXTRA_TOOLS], ["telegram-download-media"], "the only read-only exception");
     await assertRejected(client, "telegram-send-message");
     await assertRejected(client, writeTool.name);
     await assertRejected(client, destructiveTool.name);

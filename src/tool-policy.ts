@@ -51,6 +51,15 @@ export const DEFAULT_HIDDEN_TOOLS: readonly string[] = [
   "telegram-get-sessions",
 ];
 
+/**
+ * Tools exposed in read-only mode although not annotated readOnlyHint:
+ * `telegram-download-media` only fetches a file from a message (its "write" is a
+ * 15-minute private copy on this server for download). It takes a chatId, so
+ * CHAT_POLICY and the per-user allowlist decide which chats it can read from.
+ * Hide it with HIDDEN_TOOLS=default,telegram-download-media.
+ */
+export const READ_ONLY_EXTRA_TOOLS: ReadonlySet<string> = new Set(["telegram-download-media"]);
+
 export interface ToolPolicy {
   readonly mode: ToolMode;
   readonly hidden: ReadonlySet<string>;
@@ -89,7 +98,9 @@ export function isToolExposed(
   policy: ToolPolicy,
 ): boolean {
   if (policy.hidden.has(tool.name)) return false;
-  if (policy.mode === "read-only" && tool.annotations.readOnlyHint !== true) return false;
+  if (policy.mode === "read-only" && tool.annotations.readOnlyHint !== true && !READ_ONLY_EXTRA_TOOLS.has(tool.name)) {
+    return false;
+  }
   if (policy.chatPolicy === "channels-and-groups" && CHANNELS_ONLY_ABSENT_TOOLS.has(tool.name)) return false;
   if (allowlistActive(policy) && ALLOWLIST_ABSENT_TOOLS.has(tool.name)) return false;
   return true;

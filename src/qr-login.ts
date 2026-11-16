@@ -4,6 +4,12 @@ import { type QrLoginHooks, runQrLogin } from "./qr-login-core.js";
 import { awaitPassword, newLoginId } from "./qr-password-channel.js";
 import type { SessionManager } from "./session-manager.js";
 
+/**
+ * Test seam: the QR step itself needs a phone and GramJS, so route-level tests
+ * swap `qrRunner.run` for a stub (and restore it). Production never touches it.
+ */
+export const qrRunner: { run: typeof runQrLogin } = { run: runQrLogin };
+
 // SSE comment-frame interval. Long enough to be cheap, short enough to stay under
 // the ~15s HTTP/2 idle threshold we observed empirically against Traefik+Bun.serve.
 const SSE_HEARTBEAT_INTERVAL_MS = 5000;
@@ -51,6 +57,25 @@ async function connectFromSession(sessions: SessionManager, sessionString: strin
 /** Shown when an existing row for this username could not be checked (Telegram unreachable). */
 const ACCOUNT_CHECK_RETRY = "Could not confirm which Telegram account this is right now. Please try again in a minute.";
 
+/** Access-key refusals (Uzbek first, English fallback). Nothing is stored when these are sent. */
+export const ACCESS_KEY_TAKEN_MSG =
+  "Bu kalit boshqa Telegram akkauntiga bog'langan. / This access key is already bound to a different Telegram account.";
+export const ACCESS_KEY_REVOKED_MSG =
+  "Kalit noto'g'ri yoki bekor qilingan. / This access key is invalid or was revoked.";
+export const ACCESS_NOT_BOUND_MSG =
+  "Bu Telegram akkaunt kirish kalitiga bog'lanmagan. Avval Claude orqali kalit bilan ulaning. / " +
+  "This Telegram account is not linked to an access key. Connect from your MCP client with your key first.";
+
+/** Access-key context for a QR login that started from a verified key. */
+export interface QrAccessOption {
+  gate: {
+    bind(label: string, telegramId: string): "ok" | "conflict" | "revoked";
+    consumeTicket(ticket: string | undefined): void;
+  };
+  label: string;
+  ticket: string;
+}
+
 /**
  * Handle QR login via SSE stream.
  *
@@ -72,6 +97,8 @@ export async function handleQrLogin(
   requestedUserId: string,
   signal: AbortSignal,
   oauth: Pick<OAuthProvider, "createBrowserHandoff">,
+  /** Access-key gate: only accounts already bound to a listed key may sign in here. */
+  access?: { enabled: boolean; isTelegramIdAllowed(telegramId: string): boolean },
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
 
@@ -105,7 +132,7 @@ export async function handleQrLogin(
         send("status", { message: "Starting QR login..." });
 
         const loginId = newLoginId();
-        const outcome = await runQrLogin(sseQrHooks(send, loginId), signal);
+        const outcome = await qrRunner.run(sseQrHooks(send, loginId), signal);
 
         if (outcome.ok && outcome.sessionString) {
           // Reconnect a live client from the new session, confirm identity, then
@@ -113,6 +140,14 @@ export async function handleQrLogin(
           // entry under this userId.
           const fresh = await connectFromSession(sessions, outcome.sessionString);
           const me = await fresh.getMe();
+          if (access?.enabled && !access.isTelegramIdAllowed(String(me.id))) {
+            // Gate on and this account holds no valid key: end the authorization the scan
+            // just created and store nothing.
+            await fresh.logOut().catch(() => {});
+            send("error_msg", { message: ACCESS_NOT_BOUND_MSG });
+            controller.close();
+            return;
+          }
           // Identity comes from the scanned account, never from the query param, and the
           // row must belong to that account, not to a previous holder of its username.
           const userId = await sessions.resolveAccountKey(me);
@@ -183,6 +218,8 @@ export async function handleOAuthQrLogin(
   },
   userIdHint: string | undefined,
   signal: AbortSignal,
+  /** Access-key gate: bind the verified key to the scanned account before anything is stored. */
+  access?: QrAccessOption,
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
 
@@ -282,11 +319,27 @@ export async function handleOAuthQrLogin(
         send("status", { message: "Scan the QR code with Telegram" });
 
         const loginId = newLoginId();
-        const outcome = await runQrLogin(sseQrHooks(send, loginId), signal);
+        const outcome = await qrRunner.run(sseQrHooks(send, loginId), signal);
 
         if (outcome.ok && outcome.sessionString) {
           const telegram = await connectFromSession(sessions, outcome.sessionString);
           const me = await telegram.getMe();
+          if (access) {
+            // First account to finish QR with this key owns it; any other account is refused.
+            // Checked before saveSessionString, so a refused scan leaves nothing behind.
+            const bound = access.gate.bind(access.label, String(me.id));
+            if (bound !== "ok") {
+              await telegram.logOut().catch(() => {});
+              logger.warn(`QR login refused by access gate (${bound})`, {
+                component: "oauth-qr",
+                event: `access_key.${bound}`,
+              });
+              send("error_msg", { message: bound === "conflict" ? ACCESS_KEY_TAKEN_MSG : ACCESS_KEY_REVOKED_MSG });
+              controller.close();
+              return;
+            }
+            access.gate.consumeTicket(access.ticket);
+          }
           // Same rule as handleQrLogin: never write into a row owned by a previous holder of
           // this username, or that owner's live tokens start driving this account.
           const userId = await sessions.resolveAccountKey(me);
@@ -410,7 +463,7 @@ export async function handleAddAccountQr(
         send("status", { message: "Scan the QR code with the Telegram account you want to add" });
 
         const loginId = newLoginId();
-        const outcome = await runQrLogin(sseQrHooks(send, loginId), signal);
+        const outcome = await qrRunner.run(sseQrHooks(send, loginId), signal);
 
         if (!outcome.ok || !outcome.sessionString) {
           send("error_msg", { message: outcome.message ?? "QR login failed" });

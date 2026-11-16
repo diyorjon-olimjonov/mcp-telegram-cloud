@@ -1,3 +1,5 @@
+import { parseAccessKeys } from "./access-keys.js";
+
 /** Sentinel default for LOG_HASH_SALT — checked at startup to flag insecure
  * configs. Exported so the warning in server.tsx stays in sync if the value
  * is rotated. */
@@ -141,6 +143,12 @@ export const config = {
    * pointing ISSUES_URL at GitLab / Jira / a mailto: bridge / a custom
    * tracker doesn't ship a misleading "GitHub Issues" label. */
   issuesLabel: optional(process.env.ISSUES_LABEL, "GitHub Issues"),
+
+  /** Access-key gate: `label -> sha256hex` from ACCESS_KEYS (`label:hash,…`). Empty = no
+   * keys; production then refuses to boot unless {@link allowOpenSignup}. See access-keys.ts. */
+  accessKeys: parseAccessKeys(process.env.ACCESS_KEYS),
+  /** `ALLOW_OPEN_SIGNUP=1`: run without ACCESS_KEYS on purpose (anyone can sign in). */
+  allowOpenSignup: process.env.ALLOW_OPEN_SIGNUP === "1",
 
   openaiAppsChallenge: optional(process.env.OPENAI_APPS_CHALLENGE, ""),
   adminToken: process.env.ADMIN_TOKEN ?? "",

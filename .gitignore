@@ -71,3 +71,6 @@ coverage/
 
 # Bun migration spike artifacts (local-only, decision doc lives in claudedocs/)
 spike/
+
+# Plain access keys from scripts/make-access-keys.ts must never be committed
+access-keys-*.csv

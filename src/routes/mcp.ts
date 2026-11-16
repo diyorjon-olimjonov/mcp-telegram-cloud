@@ -1,8 +1,10 @@
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import { type AccessGate, cutOffUser } from "../access-keys.js";
 import { config } from "../config.js";
 import type { DestructiveGuard } from "../destructive-guard.js";
+import { logger, logUser } from "../logger.js";
 import { handleMcpRequest } from "../mcp-handler.js";
 import type { OAuthProvider } from "../oauth.js";
 import { makeMcpRateLimit } from "../rate-limit.js";
@@ -17,6 +19,8 @@ export interface McpRoutesDeps {
   usage: UsageTracker;
   destructive: DestructiveGuard;
   uploads: UploadStore;
+  /** Access-key gate: re-checked on every request. Absent ⇒ no check. */
+  access?: AccessGate;
 }
 
 /**
@@ -28,7 +32,10 @@ export interface McpRoutesDeps {
  * boundaries loses the trailing slash. Registering on the root app
  * with explicit paths is the portable approach.
  */
-export function registerMcpRoutes(app: Hono, { oauth, sessions, usage, destructive, uploads }: McpRoutesDeps): void {
+export function registerMcpRoutes(
+  app: Hono,
+  { oauth, sessions, usage, destructive, uploads, access }: McpRoutesDeps,
+): void {
   // Wildcard origin is deliberate and safe HERE, because this endpoint is
   // Bearer-only: identity comes from an OAuth access token in the Authorization
   // header, never from a cookie (see the handler below). `credentials` is NOT
@@ -74,6 +81,19 @@ export function registerMcpRoutes(app: Hono, { oauth, sessions, usage, destructi
         userId = tokenInfo.userId;
         clientName = tokenInfo.clientName;
       }
+    }
+
+    // Access-key gate: the key behind this user must still be listed. If it was
+    // removed (or re-issued), cut the user off on this contact — Telegram session
+    // logged out + deleted, all tokens revoked — and answer like any unknown token.
+    if (userId && access?.enabled && !access.isUserAllowed(userId, sessions)) {
+      logger.warn(`Access key revoked: cutting off ${logUser(userId)}`, {
+        component: "mcp",
+        event: "access_key.cut_off",
+        userId: logUser(userId),
+      });
+      await cutOffUser(userId, sessions, oauth);
+      userId = null;
     }
 
     if (!userId) {

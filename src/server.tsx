@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 overpod
 import "dotenv/config";
 import { Hono } from "hono";
+import { AccessGate, assertAccessGateConfig } from "./access-keys.js";
 import { config, SENTINEL_LOG_HASH_SALT } from "./config.js";
 import { DestructiveGuard } from "./destructive-guard.js";
 import { HTTP_IDLE_TIMEOUT_S } from "./http-timeouts.js";
@@ -54,8 +55,25 @@ if (!config.logUserIds && config.logHashSalt === SENTINEL_LOG_HASH_SALT) {
   );
 }
 
+// Refuse to boot an open server in production by accident (before any DB is opened).
+assertAccessGateConfig({
+  nodeEnv: process.env.NODE_ENV,
+  keyCount: config.accessKeys.size,
+  allowOpenSignup: config.allowOpenSignup,
+});
+
 const sessions = new SessionManager();
 const oauth = new OAuthProvider({ issuer: config.issuer, db: sessions.getDb() });
+const access = new AccessGate(sessions.getDb(), config.accessKeys, { allowOpenSignup: config.allowOpenSignup });
+{
+  const pruned = access.pruneStaleBindings();
+  logger.info(
+    access.enabled
+      ? `Access-key gate ON: ${access.labelCount} key(s) listed, ${pruned} stale binding(s) removed`
+      : "Access-key gate OFF (ALLOW_OPEN_SIGNUP=1): any Telegram account can sign in",
+    { component: "config", event: "access_gate.config" },
+  );
+}
 sessions.setOnSessionDead(createDeadSessionHandler(sessions, oauth));
 const usage = new UsageTracker(sessions.getDb());
 const destructive = new DestructiveGuard(
@@ -282,12 +300,12 @@ app.use("*", securityHeaders);
 app.use("*", noindex);
 app.route("/", createStaticRoutes({ sessions }));
 app.route("/", createOAuthWellKnownRoutes(oauth));
-app.route("/oauth", createOAuthRoutes({ oauth, sessions }));
+app.route("/oauth", createOAuthRoutes({ oauth, sessions, access }));
 app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
-registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads });
-app.route("/login", createLoginRoutes({ sessions, oauth }));
+registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads, access });
+app.route("/login", createLoginRoutes({ sessions, oauth, access }));
 app.route("/my", createMyRoutes({ destructive, sessions, uploads, downloads, oauth }));
-app.route("/accounts", createAccountsRoutes({ sessions }));
+app.route("/accounts", createAccountsRoutes({ sessions, access }));
 // Directory-review access: hands a reviewer the demo session so the OAuth fast
 // path can skip the QR code they have no way to scan.
 app.route("/review", createReviewRoutes({ sessions, oauth }));

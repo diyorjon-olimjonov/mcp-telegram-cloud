@@ -1,6 +1,16 @@
+import { randomBytes } from "node:crypto";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import {
+  type AccessGate,
+  cutOffUser,
+  KEY_CSRF_COOKIE,
+  KEY_TICKET_COOKIE,
+  KEY_TICKET_TTL_MS,
+  readCookie,
+  safeEqual,
+} from "../access-keys.js";
 import { config } from "../config.js";
 import {
   buildBrowserSessionCookie,
@@ -12,10 +22,11 @@ import {
 import { logger, logUser } from "../logger.js";
 import { contentSecurityPolicy, formActionSource } from "../middleware/security-headers.js";
 import { type OAuthProvider, parsedUris } from "../oauth.js";
+import { AccessKeyPage } from "../pages/AccessKeyPage.js";
 import { AuthorizePage } from "../pages/AuthorizePage.js";
 import { ConsentPage } from "../pages/ConsentPage.js";
 import { handleOAuthQrLogin } from "../qr-login.js";
-import { oauthRateLimit, qrLoginRateLimit, registerRateLimit, reviewRateLimit } from "../rate-limit.js";
+import { getClientIp, oauthRateLimit, qrLoginRateLimit, registerRateLimit, reviewRateLimit } from "../rate-limit.js";
 import { detectRequestLocale, islandScripts, reactPagesAvailable, renderReactPage } from "../react-pages.js";
 import { redirectOrigin } from "../redirect-origin.js";
 import { isAllowedRedirectUri, matchRedirectUri } from "../redirect-uri-matcher.js";
@@ -26,6 +37,14 @@ import { extractReviewToken, reviewPage } from "./review.js";
 export interface OAuthRoutesDeps {
   oauth: OAuthProvider;
   sessions: SessionManager;
+  /** Access-key gate. Absent or disabled ⇒ no key step (upstream behavior). */
+  access?: AccessGate;
+}
+
+/** `Set-Cookie` for the access-key flow: scoped to /oauth, HttpOnly, Secure on https. */
+function accessCookie(name: string, value: string, maxAgeSeconds: number, sameSite: "Lax" | "Strict"): string {
+  const secure = config.issuer.startsWith("https://") ? "; Secure" : "";
+  return `${name}=${value}; Path=/oauth; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=${sameSite}${secure}`;
 }
 
 /**
@@ -154,8 +173,33 @@ export function createOAuthWellKnownRoutes(oauth: OAuthProvider): Hono {
   return app;
 }
 
-export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
+export function createOAuthRoutes({ oauth, sessions, access }: OAuthRoutesDeps): Hono {
   const app = new Hono();
+
+  const gateOn = (): boolean => access?.enabled === true;
+  /** Is this OAuth user still backed by a listed access key? Always true when the gate is off. */
+  const userAllowed = (userId: string): boolean => !access?.enabled || access.isUserAllowed(userId, sessions);
+  /** Label of the verified key this browser carries (ticket cookie), or null. */
+  const ticketLabel = (c: Context): string | null =>
+    access?.ticketLabel(readCookie(c.req.header("cookie"), KEY_TICKET_COOKIE)) ?? null;
+
+  /** Render the access-key form with a fresh double-submit CSRF token. */
+  const keyPage = (
+    c: Context,
+    params: {
+      clientId: string;
+      redirectUri: string;
+      state: string;
+      codeChallenge: string;
+      codeChallengeMethod: string;
+    },
+    error?: "invalid" | "blocked",
+  ) => {
+    const csrf = randomBytes(32).toString("hex");
+    c.header("Set-Cookie", accessCookie(KEY_CSRF_COOKIE, csrf, 30 * 60, "Strict"), { append: true });
+    c.header("Cache-Control", "no-store");
+    return c.html(<AccessKeyPage {...params} csrf={csrf} {...(error && { error })} />, error ? 403 : 200);
+  };
 
   app.use("/*", oauthRateLimit);
   // Small JSON/form bodies only — token/register/revoke payloads are KBs.
@@ -245,7 +289,10 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     // full authorization code for the victim's Telegram (verified against prod
     // before this fix). Unknown destination ⇒ ask the human first. Returning
     // users see no change: hasGrant() also counts tokens they already hold.
-    const userIdHint = sessionUser(c, oauth);
+    // A browser session whose key was revoked is no session at all for the gate:
+    // the visitor falls through to the key step below.
+    const rawUserIdHint = sessionUser(c, oauth);
+    const userIdHint = rawUserIdHint && userAllowed(rawUserIdHint) ? rawUserIdHint : undefined;
     const originKey = redirectOrigin(redirectUri);
 
     if (userIdHint) {
@@ -292,6 +339,13 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       }
     }
 
+    // Access-key gate: the key comes before the QR. A verified key leaves a
+    // short-lived ticket cookie; without one, show the key form instead.
+    if (gateOn() && !ticketLabel(c)) {
+      incr(OAUTH_FLOW, { step: "authorize", outcome: "access_key_page" });
+      return keyPage(c, { clientId, redirectUri, state, codeChallenge, codeChallengeMethod });
+    }
+
     incr(OAUTH_FLOW, { step: "authorize", outcome: "qr_page" });
     allowFormRedirectTo(c, redirectUri);
 
@@ -327,6 +381,78 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     );
   });
 
+  /**
+   * Access-key form submit. CSRF: Origin must equal the issuer AND the
+   * double-submit token must match the SameSite=Strict `ak_csrf` cookie.
+   * Brute force: failed attempts are counted per IP; once blocked, even a
+   * correct key is refused until the window passes. The key is compared in
+   * constant time against hashes only (see AccessGate.verify) and is never
+   * logged or stored.
+   */
+  app.post("/authorize/key", async (c) => {
+    if (!access || !gateOn()) return c.text("Not found", 404);
+    if (c.req.header("origin") !== config.issuer) {
+      incr(OAUTH_FLOW, { step: "access_key", outcome: "bad_origin" });
+      return c.text("Forbidden", 403);
+    }
+    const form = await c.req.parseBody().catch(() => null);
+    const field = (name: string): string => {
+      const v = form?.[name];
+      return typeof v === "string" ? v : "";
+    };
+    const csrfCookie = readCookie(c.req.header("cookie"), KEY_CSRF_COOKIE) ?? "";
+    if (!csrfCookie || !safeEqual(csrfCookie, field("csrf"))) {
+      incr(OAUTH_FLOW, { step: "access_key", outcome: "bad_csrf" });
+      return c.text("Forbidden", 403);
+    }
+
+    const params = {
+      clientId: field("client_id"),
+      redirectUri: field("redirect_uri"),
+      state: field("state"),
+      codeChallenge: field("code_challenge"),
+      codeChallengeMethod: field("code_challenge_method") || "S256",
+    };
+    const client = oauth.getClient(params.clientId);
+    if (!client) return c.text("Unknown client", 400);
+    if (!matchRedirectUri(parsedUris(client.redirect_uris), params.redirectUri)) {
+      return c.text("Invalid redirect_uri", 400);
+    }
+    if (!params.codeChallenge || params.codeChallengeMethod !== "S256") {
+      return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
+    }
+
+    const ip = getClientIp(c);
+    if (access.isBlocked(ip)) {
+      incr(OAUTH_FLOW, { step: "access_key", outcome: "blocked" });
+      logger.warn("Access key attempts blocked for this IP", { component: "oauth", event: "access_key.blocked" });
+      return keyPage(c, params, "blocked");
+    }
+    const label = access.verify(field("access_key").slice(0, 256));
+    if (!label) {
+      access.recordFailure(ip);
+      incr(OAUTH_FLOW, { step: "access_key", outcome: "invalid" });
+      logger.warn("Access key rejected", { component: "oauth", event: "access_key.rejected" });
+      return keyPage(c, params, "invalid");
+    }
+
+    const ticket = access.issueTicket(label);
+    c.header("Set-Cookie", accessCookie(KEY_TICKET_COOKIE, ticket, KEY_TICKET_TTL_MS / 1000, "Lax"), { append: true });
+    c.header("Set-Cookie", accessCookie(KEY_CSRF_COOKIE, "", 0, "Strict"), { append: true });
+    incr(OAUTH_FLOW, { step: "access_key", outcome: "ok" });
+    logger.info(`Access key accepted (${label})`, { component: "oauth", event: "access_key.accepted" });
+
+    const next = new URLSearchParams({
+      response_type: "code",
+      client_id: params.clientId,
+      redirect_uri: params.redirectUri,
+      code_challenge: params.codeChallenge,
+      code_challenge_method: params.codeChallengeMethod,
+    });
+    if (params.state) next.set("state", params.state);
+    return c.redirect(`/oauth/authorize?${next.toString()}`, 303);
+  });
+
   app.get("/authorize/qr", qrLoginRateLimit, async (c) => {
     const clientId = c.req.query("client_id") ?? "";
     const redirectUri = c.req.query("redirect_uri") ?? "";
@@ -358,7 +484,21 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     // the QR — a deliberate act — instead of the code appearing by itself.
     const rawHint = sessionUser(c, oauth);
     const qrOriginKey = redirectOrigin(redirectUri);
-    const userIdHint = rawHint && qrOriginKey && oauth.hasGrant(rawHint, qrOriginKey) ? rawHint : undefined;
+    const userIdHint =
+      rawHint && qrOriginKey && oauth.hasGrant(rawHint, qrOriginKey) && userAllowed(rawHint) ? rawHint : undefined;
+
+    // Access-key gate: a new QR login needs a verified key (ticket cookie).
+    // Refused BEFORE the stream opens, so no MTProto connection is made.
+    let accessOpt: { gate: AccessGate; label: string; ticket: string } | undefined;
+    if (access && gateOn() && !userIdHint) {
+      const ticket = readCookie(c.req.header("cookie"), KEY_TICKET_COOKIE);
+      const label = access.ticketLabel(ticket);
+      if (!label || !ticket) {
+        incr(OAUTH_FLOW, { step: "authorize_qr", outcome: "no_access_key" });
+        return c.text("Access key required — reload the page and enter your key.", 403);
+      }
+      accessOpt = { gate: access, label, ticket };
+    }
 
     const stream = await handleOAuthQrLogin(
       sessions,
@@ -366,6 +506,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       { clientId, redirectUri, state, codeChallenge, codeChallengeMethod },
       userIdHint,
       c.req.raw.signal,
+      accessOpt,
     );
 
     return new Response(stream, {
@@ -430,6 +571,10 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     }
     // Prove the session is real, exactly like the fast path does. A cookie
     // value alone is a claim, not a credential.
+    if (!userAllowed(userId)) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "access_revoked" });
+      return c.text("Access key revoked — start again from your client", 403);
+    }
     const telegram = await sessions.tryReconnectSession(userId);
     if (!telegram) {
       incr(OAUTH_FLOW, { step: "approve", outcome: "session_invalid" });
@@ -515,7 +660,9 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     }
 
     const token = extractReviewToken(field("review_code"));
-    const resolved = token ? sessions.resolveReviewToken(token) : null;
+    const candidate = token ? sessions.resolveReviewToken(token) : null;
+    // Gate on: a review link is just another account and needs a bound key too.
+    const resolved = candidate && userAllowed(candidate.userId) ? candidate : null;
     if (!resolved) {
       // Same answer for malformed, unknown, revoked and expired (see GET /review).
       incr(OAUTH_FLOW, { step: "review_code", outcome: "rejected" });
@@ -591,6 +738,26 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     return c.text(result.body, result.status);
   });
 
+  /**
+   * Access-key re-check on every token issued (code exchange AND refresh). The
+   * fresh token is resolved back to its user; a user whose key was revoked is
+   * cut off right here — Telegram session logged out and deleted, every token
+   * revoked — and the client gets `invalid_grant`.
+   */
+  const revokedHolder = async (issued: { access_token: string }): Promise<boolean> => {
+    if (!gateOn()) return false;
+    const userId = oauth.validateToken(issued.access_token)?.userId;
+    if (!userId) return true;
+    if (userAllowed(userId)) return false;
+    logger.warn(`Access key revoked: cutting off ${logUser(userId)}`, {
+      component: "oauth",
+      event: "access_key.cut_off",
+      userId: logUser(userId),
+    });
+    await cutOffUser(userId, sessions, oauth);
+    return true;
+  };
+
   app.post("/token", async (c) => {
     const params = await parseTokenParams(c);
 
@@ -602,7 +769,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         redirectUri: params.redirect_uri ?? "",
       });
 
-      if (!result) {
+      if (!result || (await revokedHolder(result))) {
         incr(OAUTH_FLOW, { step: "token", outcome: "invalid_grant" });
         return c.json({ error: "invalid_grant" }, 400);
       }
@@ -617,7 +784,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         clientId: params.client_id ?? "",
       });
 
-      if (!result) {
+      if (!result || (await revokedHolder(result))) {
         incr(OAUTH_FLOW, { step: "refresh", outcome: "invalid_grant" });
         return c.json({ error: "invalid_grant" }, 400);
       }

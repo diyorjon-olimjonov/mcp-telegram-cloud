@@ -6,7 +6,12 @@ import type { SessionManager } from "../session-manager.js";
 
 export interface AccountsRoutesDeps {
   sessions: SessionManager;
+  /** Access-key gate: when on, one key = one Telegram account, so adding more is refused. */
+  access?: { enabled: boolean };
 }
+
+const ADD_ACCOUNT_DISABLED =
+  "Qo'shimcha akkaunt qo'shish o'chirilgan. / Adding more Telegram accounts is disabled on this server (one access key = one account).";
 
 /**
  * v2.32.0 multi-account routes.
@@ -20,8 +25,13 @@ export interface AccountsRoutesDeps {
  * already used / expired / unknown, both endpoints 404 — no information leak
  * about which case it was.
  */
-export function createAccountsRoutes({ sessions }: AccountsRoutesDeps): Hono {
+export function createAccountsRoutes({ sessions, access }: AccountsRoutesDeps): Hono {
   const app = new Hono();
+
+  app.use("/add/*", async (c, next) => {
+    if (access?.enabled) return c.text(ADD_ACCOUNT_DISABLED, 403);
+    return next();
+  });
 
   // HTML page — uses peekAddAccountToken so a reload during the QR window still
   // renders. The token isn't consumed until the EventSource opens (next route).

@@ -9,9 +9,11 @@ import type { SessionManager } from "../session-manager.js";
 export interface LoginRoutesDeps {
   sessions: SessionManager;
   oauth: Pick<OAuthProvider, "createBrowserHandoff">;
+  /** Access-key gate: only Telegram accounts bound to a listed key may sign in. */
+  access?: { enabled: boolean; isTelegramIdAllowed(telegramId: string): boolean };
 }
 
-export function createLoginRoutes({ sessions, oauth }: LoginRoutesDeps): Hono {
+export function createLoginRoutes({ sessions, oauth, access }: LoginRoutesDeps): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -32,7 +34,7 @@ export function createLoginRoutes({ sessions, oauth }: LoginRoutesDeps): Hono {
       return c.text("userId required", 400);
     }
 
-    const stream = await handleQrLogin(sessions, userId, c.req.raw.signal, oauth);
+    const stream = await handleQrLogin(sessions, userId, c.req.raw.signal, oauth, access);
 
     return new Response(stream, {
       headers: {

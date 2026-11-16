@@ -17,7 +17,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { css, cx } from "hono/css";
 import type { FC } from "hono/jsx";
-import { type ChatAllowlist, type ChatKind, chatIds } from "../chat-allowlist.js";
+import { type ChatAllowlist, type ChatKind, chatIds, isPublicChat } from "../chat-allowlist.js";
 import { config } from "../config.js";
 import { readBrowserSessionToken } from "../cookie-handler.js";
 import { logger, logUser } from "../logger.js";
@@ -42,6 +42,8 @@ export interface DialogRow {
   title: string;
   kind: ChatKind;
   members: number | null;
+  /** Has an @username: readable by default unless unticked. */
+  public: boolean;
   /** Unix seconds of the last message, 0 if unknown. */
   date: number;
 }
@@ -53,7 +55,7 @@ interface RawDialog {
   isGroup?: boolean;
   isChannel?: boolean;
   date?: number;
-  entity?: { participantsCount?: number | null; megagroup?: boolean };
+  entity?: { participantsCount?: number | null; megagroup?: boolean; username?: string };
 }
 
 /** Groups and channels only (users, bots and Saved Messages are never listed). */
@@ -65,6 +67,7 @@ export function toDialogRows(dialogs: readonly RawDialog[]): DialogRow[] {
       title: d.title ?? d.name ?? "",
       kind: (d.isChannel && !d.isGroup ? "channel" : "group") as ChatKind,
       members: typeof d.entity?.participantsCount === "number" ? d.entity.participantsCount : null,
+      public: isPublicChat(d.entity),
       date: d.date ?? 0,
     }))
     .filter((r) => /^-\d+$/.test(r.id));
@@ -133,11 +136,12 @@ export const MyChatsPage: FC<{ username: string }> = (props) => (
     <div class={cx(card, wide)}>
       <h1 class={title}>O'qiladigan guruh va kanallar</h1>
       <p class={subtitle}>
-        @{props.username} — Claude faqat siz belgilagan guruh va kanallarni o'qiy oladi. Hech narsa belgilanmagan
-        bo'lsa, hech biri o'qilmaydi. Shaxsiy chatlar, botlar va "Saqlangan xabarlar" hech qachon o'qilmaydi.
+        @{props.username} — Claude faqat belgilangan guruh va kanallarni o'qiy oladi. Ochiq (@username'li) guruh va
+        kanallar avtomatik belgilangan — xohlasangiz olib tashlang. Yopiq (private) guruh va kanallarni o'zingiz
+        belgilang. Shaxsiy chatlar, botlar va "Saqlangan xabarlar" hech qachon o'qilmaydi.
         <br />
         <span class={hint}>
-          Only the groups and channels you tick here can be read. Rules can be changed only on this page.
+          Public groups/channels are ticked by default; private ones must be ticked. Rules change only on this page.
         </span>
       </p>
       <input
@@ -173,7 +177,8 @@ export const MY_CHATS_JS = `"use strict";
   const list = $("chat-list"), search = $("chat-search"), count = $("chat-count");
   const more = $("chat-more"), status = $("chat-status");
   const dialogs = new Map(); // id -> row, insertion order = most recent activity first
-  const selected = new Map(); // id -> row
+  const selected = new Map(); // id -> row (explicitly ticked)
+  const denied = new Set(); // public chats explicitly unticked
   let next = null, loading = false, firstLoad = true;
 
   const pad = (n) => String(n).padStart(2, "0");
@@ -184,6 +189,7 @@ export const MY_CHATS_JS = `"use strict";
   };
   const fmtNum = (n) => String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, " ");
   const info = (id) => Object.assign({}, selected.get(id) || {}, dialogs.get(id) || {});
+  const ticked = (r) => selected.has(r.id) || (r.public === true && !denied.has(r.id));
 
   function row(r, checked) {
     const li = document.createElement("li");
@@ -199,7 +205,7 @@ export const MY_CHATS_JS = `"use strict";
     t.textContent = r.title || "(nomsiz)";
     const meta = document.createElement("div");
     meta.className = "chat-meta";
-    const parts = [r.kind === "channel" ? "kanal" : "guruh"];
+    const parts = [r.kind === "channel" ? "kanal" : "guruh", r.public ? "ochiq" : "yopiq"];
     if (typeof r.members === "number") parts.push(fmtNum(r.members) + " a'zo");
     if (r.date) parts.push("oxirgi faollik: " + fmtDate(r.date));
     meta.textContent = parts.join(" · ");
@@ -212,11 +218,13 @@ export const MY_CHATS_JS = `"use strict";
   function render() {
     const q = search.value.trim().toLowerCase();
     const match = (r) => !q || (r.title || "").toLowerCase().includes(q);
-    const pinned = [...selected.keys()].map(info).sort((a, b) => (b.date || 0) - (a.date || 0));
+    const ids = new Set([...selected.keys()]);
+    for (const r of dialogs.values()) if (ticked(r)) ids.add(r.id);
+    const pinned = [...ids].map(info).sort((a, b) => (b.date || 0) - (a.date || 0));
     list.replaceChildren();
     for (const r of pinned) if (match(r)) list.append(row(r, true));
-    for (const r of dialogs.values()) if (!selected.has(r.id) && match(r)) list.append(row(r, false));
-    count.textContent = String(selected.size);
+    for (const r of dialogs.values()) if (!ids.has(r.id) && match(r)) list.append(row(r, false));
+    count.textContent = String(ids.size);
     more.hidden = !next;
     if (!loading) {
       status.textContent = list.children.length
@@ -236,7 +244,10 @@ export const MY_CHATS_JS = `"use strict";
       if (res.status === 401) { location.href = "/my/key?next=/my/chats"; return; }
       if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
-      if (firstLoad) for (const s of data.selected) selected.set(s.id, s);
+      if (firstLoad) {
+        for (const s of data.selected) selected.set(s.id, s);
+        for (const id of data.denied || []) denied.add(id);
+      }
       firstLoad = false;
       for (const d of data.dialogs) dialogs.set(d.id, d);
       next = data.next;
@@ -261,7 +272,8 @@ export const MY_CHATS_JS = `"use strict";
         body: JSON.stringify({ id: r.id, on }),
       });
       if (!res.ok) throw new Error(String(res.status));
-      if (on) selected.set(r.id, r); else selected.delete(r.id);
+      if (on) { selected.set(r.id, r); denied.delete(r.id); }
+      else { selected.delete(r.id); if (r.public) denied.add(r.id); }
       render();
     } catch {
       box.checked = !on;
@@ -308,6 +320,7 @@ export function createMyChatsRoutes(deps: MyChatsDeps): Hono {
     const last = raw.length === DIALOG_PAGE_SIZE ? raw[raw.length - 1]?.date : undefined;
     return c.json({
       selected: deps.allowlist.list(userId),
+      denied: deps.allowlist.deniedIds(userId),
       dialogs: toDialogRows(raw),
       next: last ? String(last) : null,
     });
@@ -324,20 +337,30 @@ export function createMyChatsRoutes(deps: MyChatsDeps): Hono {
     const id = typeof body?.id === "string" ? body.id : "";
     if (!/^-\d{1,20}$/.test(id) || typeof body?.on !== "boolean") return c.json({ error: "bad_request" }, 400);
 
-    if (!body.on) {
-      deps.allowlist.remove(userId, id);
-    } else {
-      // Only a group/channel this account can actually resolve can be ticked; the
-      // stored title/kind come from Telegram, not from the request.
-      const telegram = await deps.sessions.tryReconnectSession(userId);
-      if (!telegram) return c.json({ error: "telegram_unavailable" }, 409);
-      let entity: unknown;
+    // Resolve on tick AND untick: unticking a PUBLIC chat must store an explicit "off"
+    // (public chats are readable by default). Title/kind/public come from Telegram.
+    const telegram = await deps.sessions.tryReconnectSession(userId);
+    let entity: unknown = null;
+    if (telegram) {
       try {
         entity = await telegram.resolveChat(id);
       } catch {
-        return c.json({ error: "chat_not_found" }, 404);
+        entity = null;
       }
-      const ids = chatIds(entity);
+    }
+    const ids = entity ? chatIds(entity) : null;
+    if (!body.on) {
+      if (ids && ids.marked === id && isPublicChat(entity)) {
+        const e = entity as { className?: string; megagroup?: boolean; title?: string };
+        const kind: ChatKind = e.className?.startsWith("Channel") && !e.megagroup ? "channel" : "group";
+        deps.allowlist.deny(userId, { id, title: e.title ?? "", kind }, ids.bare);
+      } else {
+        // Private (or no longer resolvable): forgetting the tick makes it unreadable again.
+        deps.allowlist.remove(userId, id);
+      }
+    } else {
+      if (!telegram) return c.json({ error: "telegram_unavailable" }, 409);
+      if (!entity) return c.json({ error: "chat_not_found" }, 404);
       if (!ids || ids.marked !== id) return c.json({ error: "not_a_group_or_channel" }, 400);
       const e = entity as { className?: string; megagroup?: boolean; title?: string };
       const kind: ChatKind = e.className?.startsWith("Channel") && !e.megagroup ? "channel" : "group";

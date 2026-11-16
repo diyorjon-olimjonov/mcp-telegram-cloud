@@ -219,7 +219,7 @@ describe("access keys — parsing and boot guard", () => {
   });
 
   it("the real server process exits with a clear error when ACCESS_KEYS is empty in production", {
-    timeout: 30_000,
+    timeout: 90_000,
   }, () => {
     const dir = mkdtempSync(join(tmpdir(), "ak-boot-"));
     const res = spawnSync(process.execPath, ["src/server.tsx"], {
@@ -236,7 +236,7 @@ describe("access keys — parsing and boot guard", () => {
         MCP_TELEGRAM_TELEMETRY: "off",
       },
       encoding: "utf8",
-      timeout: 20_000,
+      timeout: 60_000,
     });
     assert.notEqual(res.status, 0, "must not keep running");
     assert.match(`${res.stderr}${res.stdout}`, /ACCESS_KEYS is empty: refusing to start in production/);

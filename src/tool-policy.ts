@@ -13,7 +13,7 @@
  *   `HIDDEN_TOOLS=default,telegram-get-sessions` extends it.
  */
 
-import { type AllowedChats, chatIds } from "./chat-allowlist.js";
+import { type AllowedChats, chatAllowed, chatIds, isPublicChat } from "./chat-allowlist.js";
 
 export type ToolMode = "read-only" | "full";
 
@@ -207,21 +207,99 @@ export async function checkChatArgs(
     if (typeof cls !== "string" || !GROUP_OR_CHANNEL.has(cls)) return CHAT_BLOCKED_MSG;
     if (allowlist) {
       const ids = chatIds(entity);
-      if (!ids || !allowlist.allowed.marked.has(ids.marked)) return allowlist.refusal;
+      if (!ids || !chatAllowed(ids.marked, isPublicChat(entity), allowlist.allowed)) return allowlist.refusal;
     }
   }
   return null;
 }
 
-type Typed = { type?: unknown; id?: unknown };
+type Typed = { type?: unknown; id?: unknown; username?: unknown };
 const isGroupOrChannel = (x: Typed | null | undefined): boolean => x?.type === "group" || x?.type === "channel";
 
-/** Listing ids are marked (`-100…`, `-…`) for dialogs and bare for search results. */
+/**
+ * Listing ids are marked (`-100…`, `-…`) for dialogs and bare for search results.
+ * Search results carry `username` (public ⇒ allowed by default); dialog listings
+ * do not, so list-chats / get-unread are answered by {@link allowlistAnswer}.
+ */
 function isAllowedListing(x: Typed | null | undefined, allowed: AllowedChats | undefined): boolean {
   if (!isGroupOrChannel(x)) return false;
   if (!allowed) return true;
-  const id = String(x?.id ?? "");
-  return id.startsWith("-") ? allowed.marked.has(id) : allowed.bare.has(id);
+  const isPublic = typeof x?.username === "string" && x.username.length > 0;
+  return chatAllowed(String(x?.id ?? ""), isPublic, allowed);
+}
+
+// ─── Limits and allowlist-aware listings ────────────────────────────────
+
+/** Upper bound for `limit` on the listing / reading tools (Telegram rate protection). */
+export const LIMIT_CAP = 100;
+export const LIMIT_CAPPED_TOOLS: ReadonlySet<string> = new Set([
+  "telegram-list-chats",
+  "telegram-get-unread",
+  "telegram-search-chats",
+  "telegram-search-global",
+  "telegram-read-messages",
+  "telegram-search-messages",
+  "telegram-read-topic-messages",
+  "telegram-get-replies",
+  "telegram-list-topics",
+]);
+
+/** Said instead of a bare empty list, so the model knows why and does not blame the server. */
+export function emptyListingMsg(settingsUrl: string): string {
+  return (
+    "No readable groups or channels found. Public groups/channels (with an @username) are readable by default; " +
+    `private ones must be ticked by the account owner at ${settingsUrl} (sign in there with the access key). ` +
+    "Private chats, bots and Saved Messages are never readable on this server. This is a setting, not a connection problem."
+  );
+}
+
+interface RawDialog {
+  id?: { toString(): string };
+  title?: string;
+  name?: string;
+  isGroup?: boolean;
+  isChannel?: boolean;
+  unreadCount?: number;
+  entity?: unknown;
+}
+
+/**
+ * Answers `telegram-list-chats` / `telegram-get-unread` under the allowlist with
+ * ONE raw dialog fetch (entities carry @username, so public-by-default works):
+ * groups/channels only, filtered by the allowlist, `filterType` and `limit`.
+ * Returns null when the tool should run normally.
+ */
+export async function allowlistAnswer(
+  toolName: string,
+  args: Record<string, unknown>,
+  telegram: { getClient?: () => unknown },
+  allowed: AllowedChats,
+  settingsUrl: string,
+): Promise<string | null> {
+  if (toolName !== "telegram-list-chats" && toolName !== "telegram-get-unread") return null;
+  const filter = args.filterType;
+  if (filter === "private" || filter === "contact_requests") return emptyListingMsg(settingsUrl);
+  const client = telegram.getClient?.() as { getDialogs(p: object): Promise<RawDialog[]> } | null | undefined;
+  if (!client) return null;
+  const limit = typeof args.limit === "number" && args.limit > 0 ? Math.min(args.limit, LIMIT_CAP) : 20;
+  const offsetDate = typeof args.offsetDate === "number" ? args.offsetDate : undefined;
+  // Over-fetch (bounded) because private chats and unticked groups are dropped below.
+  const dialogs = await client.getDialogs({ limit: Math.min(limit * 3, 300), ...(offsetDate && { offsetDate }) });
+  const rows: string[] = [];
+  for (const d of dialogs) {
+    if (!(d.isGroup || d.isChannel)) continue;
+    const kind = d.isChannel && !d.isGroup ? "channel" : "group";
+    if (filter !== undefined && filter !== kind) continue;
+    const id = d.id?.toString() ?? "";
+    if (!chatAllowed(id, isPublicChat(d.entity), allowed)) continue;
+    const unread = d.unreadCount ?? 0;
+    if (toolName === "telegram-get-unread" && unread <= 0) continue;
+    rows.push(
+      `${kind === "channel" ? "C" : "G"} ${d.title ?? d.name ?? ""} (${id})${unread > 0 ? ` [${unread} unread]` : ""}`,
+    );
+    if (rows.length >= limit) break;
+  }
+  return rows.length > 0 ? rows.join("\n") : emptyListingMsg(settingsUrl);
 }
 
 /**

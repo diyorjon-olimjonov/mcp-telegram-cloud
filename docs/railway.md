@@ -109,7 +109,9 @@ Then open `https://<domain>/my/chats` and tick the groups/channels Claude may
 read. It asks for the **same access key** (any browser or phone; the sign-in
 lasts 12 hours and the key only opens the settings of the Telegram account it
 is bound to, so it works only after that person has connected once) — with
-`CHAT_ALLOWLIST=on` (default) nothing is readable until you do. The page has a
+`CHAT_ALLOWLIST=on` (default) **public** groups/channels (with an @username) are
+ticked by default and can be unticked, while **private** ones are readable only
+once ticked. The page has a
 search box, shows the 300 most recent dialogs (then "Ko'proq ko'rsatish"), pins
 ticked chats on top with "N ta tanlangan", and is the only place these rules
 can change. Then try:
@@ -157,7 +159,7 @@ Rules enforced by the server:
 | `TOOL_MODE` | `read-only`, `full` | `read-only` | `read-only`: only tools annotated `readOnlyHint=true`; others are absent from `tools/list` and refused by name; the destructive toggle on `/my/settings` is hidden. Unknown value stops the boot. |
 | `HIDDEN_TOOLS` | comma list, `none`, `default,…` | default list | Removes tools in every mode. Unknown names are logged at boot. |
 | `CHAT_POLICY` | `channels-and-groups`, `all` | `channels-and-groups` | Every chat argument must be a group/channel (checked before the Telegram call; unresolvable ⇒ refused); listings drop private chats and bots; unfilterable cross-chat tools are absent. Applies in both tool modes. |
-| `CHAT_ALLOWLIST` | `on`, `off` | `on` | With `channels-and-groups`: only chats the user ticked on `/my/chats` are readable (deny by default); listings show only ticked chats; `telegram-get-groups-for-discussion` and `telegram-get-my-boosts` are absent. No MCP tool can read or change the rules. |
+| `CHAT_ALLOWLIST` | `on`, `off` | `on` | With `channels-and-groups`: public groups/channels are readable by default (the user can untick them on `/my/chats`), private ones only when ticked there; listings show only ticked chats; `telegram-get-groups-for-discussion` and `telegram-get-my-boosts` are absent. No MCP tool can read or change the rules. |
 
 Default `HIDDEN_TOOLS`:
 `telegram-get-contacts`, `telegram-get-contact-requests`, `telegram-get-profile`,

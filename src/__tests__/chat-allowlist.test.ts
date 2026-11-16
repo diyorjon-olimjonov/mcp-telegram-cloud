@@ -36,25 +36,39 @@ const POLICY: Policy = {
   chatAllowlist: true,
 };
 
-// Channel 1234567890 (-1001234567890), channel 555 (-100555), basic group 4001 (-4001).
-const ENTITIES: Record<string, { className: string; id: string; title: string; megagroup?: boolean }> = {
-  "@fvhokimligi": { className: "Channel", id: "1234567890", title: "FV Hokimligi" },
-  "-1001234567890": { className: "Channel", id: "1234567890", title: "FV Hokimligi" },
-  "@other": { className: "Channel", id: "555", title: "Other" },
+// FV Hokimligi: PUBLIC channel (@fvhokimligi). Other: PRIVATE channel 555. Team: PRIVATE basic group 4001.
+const ENTITIES: Record<string, { className: string; id: string; title: string; username?: string }> = {
+  "@fvhokimligi": { className: "Channel", id: "1234567890", title: "FV Hokimligi", username: "fvhokimligi" },
+  "-1001234567890": { className: "Channel", id: "1234567890", title: "FV Hokimligi", username: "fvhokimligi" },
   "-100555": { className: "Channel", id: "555", title: "Other" },
   "-4001": { className: "Chat", id: "4001", title: "Team" },
-  "@alice": { className: "User", id: "77", title: "" },
+  "@alice": { className: "User", id: "77", title: "", username: "alice" },
 };
 const DIALOGS = [
-  { id: "-1001234567890", name: "FV Hokimligi", type: "channel", unreadCount: 1 },
+  { id: "-1001234567890", name: "FV Hokimligi", type: "channel", unreadCount: 1, username: "fvhokimligi" },
   { id: "-100555", name: "Other", type: "channel", unreadCount: 1 },
   { id: "-4001", name: "Team", type: "group", unreadCount: 1 },
-  { id: "77", name: "Alice", type: "private", unreadCount: 1 },
+  { id: "77", name: "Alice", type: "private", unreadCount: 1, username: "alice" },
+];
+/** What GramJS client.getDialogs returns (entities carry @username). */
+const RAW_DIALOGS = [
+  {
+    id: "-1001234567890",
+    title: "FV Hokimligi",
+    isChannel: true,
+    isGroup: false,
+    unreadCount: 1,
+    entity: { username: "fvhokimligi" },
+  },
+  { id: "-100555", title: "Other", isChannel: true, isGroup: false, unreadCount: 1, entity: {} },
+  { id: "-4001", title: "Team", isChannel: false, isGroup: true, unreadCount: 1, entity: {} },
+  { id: "77", title: "Alice", isChannel: false, isGroup: false, unreadCount: 1, entity: { username: "alice" } },
 ];
 const bareOf = (marked: string) => marked.replace(/^-(100)?/, "");
 
 function fakeTelegram() {
   const calls: string[] = [];
+  const argsOf: Record<string, unknown[]> = {};
   const impl: Record<string, (...a: unknown[]) => unknown> = {
     resolveChat: async (ref) => {
       const e = ENTITIES[String(ref)];
@@ -74,19 +88,28 @@ function fakeTelegram() {
       })),
     getMessages: async () => [],
   };
+  const rawClient = {
+    getDialogs: async (p: unknown) => {
+      calls.push("client.getDialogs");
+      argsOf["client.getDialogs"] = [p];
+      return RAW_DIALOGS;
+    },
+  };
   const telegram = new Proxy({} as TelegramService, {
     get(_t, prop) {
       const name = String(prop);
       if (name === "then") return undefined;
+      if (name === "getClient") return () => rawClient;
       return async (...args: unknown[]) => {
         calls.push(name);
+        argsOf[name] = args;
         const fn = impl[name];
         if (!fn) throw new Error(`unexpected Telegram call ${name}`);
         return fn(...args);
       };
     },
   });
-  return { telegram, calls };
+  return { telegram, calls, argsOf };
 }
 
 type Handler = (a: unknown, e: unknown) => Promise<CallToolResult>;
@@ -109,7 +132,7 @@ function register(allowedChats?: () => Allowed) {
     assert.ok(r, `${name} not registered`);
     return r;
   };
-  return { registered, call, calls: fake.calls };
+  return { registered, call, calls: fake.calls, argsOf: fake.argsOf };
 }
 
 const text = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
@@ -122,6 +145,18 @@ function tick(list: InstanceType<typeof ChatAllowlist>, user: string, ref: strin
   assert.ok(e && ids);
   list.allow(user, { id: ids.marked, title: e.title, kind: e.className === "Chat" ? "group" : "channel" }, ids.bare);
 }
+function untick(list: InstanceType<typeof ChatAllowlist>, user: string, ref: string) {
+  const e = ENTITIES[ref];
+  const ids = chatIds(e);
+  assert.ok(e && ids);
+  list.deny(user, { id: ids.marked, title: e.title, kind: "channel" }, ids.bare);
+}
+const LISTINGS = [
+  ["telegram-list-chats", { limit: 20 }],
+  ["telegram-get-unread", { limit: 20 }],
+  ["telegram-search-chats", { query: "a", limit: 20 }],
+  ["telegram-search-global", { query: "a", limit: 20 }],
+] as const;
 
 describe("chat allowlist — ids and parsing", () => {
   it("marks ids exactly like GramJS dialog ids", () => {
@@ -142,29 +177,40 @@ describe("chat allowlist — ids and parsing", () => {
   });
 });
 
-describe("chat allowlist — deny by default", () => {
-  it("nothing ticked (or no source wired): reads are refused before the Telegram read and point at /my/chats", async () => {
+describe("chat allowlist — public by default, private needs a tick", () => {
+  it("nothing ticked: a PUBLIC channel is readable, PRIVATE groups/channels are refused before the read", async () => {
     const list = store();
     for (const r of [register(() => list.forUser("u1")), register()]) {
-      const res = await r.call("telegram-read-messages", { chatId: "@fvhokimligi", limit: 3 });
-      assert.equal(res.isError, true);
-      assert.match(text(res), /not in your readable list.*https:\/\/host\.example\/my\/chats/);
-      assert.deepEqual(r.calls, ["resolveChat"]);
+      const pub = await r.call("telegram-read-messages", { chatId: "@fvhokimligi", limit: 3 });
+      assert.notEqual(pub.isError, true, text(pub));
+      assert.deepEqual(r.calls, ["resolveChat", "getMessages"]);
+      for (const chatId of ["-100555", "-4001"]) {
+        const res = await r.call("telegram-read-messages", { chatId, limit: 3 });
+        assert.equal(res.isError, true);
+        assert.match(text(res), /not in your readable list.*https:\/\/host\.example\/my\/chats/);
+        assert.deepEqual(r.calls, ["resolveChat"]);
+      }
     }
   });
 
-  it("nothing ticked: listings and searches are empty", async () => {
+  it("nothing ticked: listings show public groups/channels only", async () => {
     const list = store();
     const { call } = register(() => list.forUser("u1"));
-    for (const [name, args] of [
-      ["telegram-list-chats", { limit: 20 }],
-      ["telegram-get-unread", { limit: 20 }],
-      ["telegram-search-chats", { query: "a", limit: 20 }],
-      ["telegram-search-global", { query: "a", limit: 20 }],
-    ] as const) {
+    for (const [name, args] of LISTINGS) {
       const out = text(await call(name, args));
-      assert.ok(!/FV Hokimligi|Other|Team|Alice/.test(out), `${name}: ${out}`);
+      assert.match(out, /FV Hokimligi/, name);
+      assert.ok(!/Other|Team|Alice/.test(out), `${name}: ${out}`);
     }
+  });
+
+  it("an empty listing explains why instead of looking broken", async () => {
+    const list = store();
+    const { call } = register(() => list.forUser("u1"));
+    const out = text(await call("telegram-list-chats", { limit: 20, filterType: "group" }));
+    assert.match(
+      out,
+      /No readable groups or channels found.*https:\/\/host\.example\/my\/chats.*not a connection problem/,
+    );
   });
 
   it("tools that list chats without a way to filter them are absent", () => {
@@ -173,46 +219,43 @@ describe("chat allowlist — deny by default", () => {
   });
 });
 
-describe("chat allowlist — ticked chats", () => {
-  it("only ticked chats are readable; a change applies on the next call", async () => {
+describe("chat allowlist — ticking and unticking", () => {
+  it("ticking a private chat makes it readable; removing the tick makes it unreadable again", async () => {
     const list = store();
     const { call, calls } = register(() => list.forUser("u1"));
-    tick(list, "u1", "@fvhokimligi");
-
-    const ok = await call("telegram-read-messages", { chatId: "@fvhokimligi", limit: 3 });
+    tick(list, "u1", "-100555");
+    const ok = await call("telegram-read-messages", { chatId: "-100555", limit: 3 });
     assert.notEqual(ok.isError, true, text(ok));
     assert.deepEqual(calls, ["resolveChat", "getMessages"]);
-    const byId = await call("telegram-read-messages", { chatId: "-1001234567890", limit: 3 });
-    assert.notEqual(byId.isError, true);
-
-    const other = await call("telegram-read-messages", { chatId: "@other", limit: 3 });
-    assert.match(text(other), /not in your readable list/);
-    assert.deepEqual(calls, ["resolveChat"]);
-
-    list.remove("u1", "-1001234567890");
-    const after = await call("telegram-read-messages", { chatId: "@fvhokimligi", limit: 3 });
-    assert.match(text(after), /not in your readable list/);
+    list.remove("u1", "-100555");
+    assert.match(text(await call("telegram-read-messages", { chatId: "-100555" })), /not in your readable list/);
   });
 
-  it("private chats stay blocked regardless", async () => {
+  it("unticking a PUBLIC chat blocks it and hides it from listings", async () => {
     const list = store();
-    tick(list, "u1", "@fvhokimligi");
+    untick(list, "u1", "@fvhokimligi");
     const { call } = register(() => list.forUser("u1"));
-    const res = await call("telegram-read-messages", { chatId: "@alice", limit: 3 });
-    assert.match(text(res), /only reads channels and groups/);
+    assert.match(text(await call("telegram-read-messages", { chatId: "@fvhokimligi" })), /not in your readable list/);
+    for (const [name, args] of LISTINGS) {
+      assert.ok(!/FV Hokimligi/.test(text(await call(name, args))), name);
+    }
+    tick(list, "u1", "@fvhokimligi");
+    assert.notEqual((await call("telegram-read-messages", { chatId: "@fvhokimligi" })).isError, true);
   });
 
-  it("listings and searches show only ticked chats (marked and bare ids)", async () => {
+  it("private 1:1 chats stay blocked regardless (even with an @username)", async () => {
+    const { call } = register(() => store().forUser("u1"));
+    assert.match(
+      text(await call("telegram-read-messages", { chatId: "@alice", limit: 3 })),
+      /only reads channels and groups/,
+    );
+  });
+
+  it("listings show ticked private chats plus public ones (marked and bare ids)", async () => {
     const list = store();
-    tick(list, "u1", "@fvhokimligi");
     tick(list, "u1", "-4001");
     const { call } = register(() => list.forUser("u1"));
-    for (const [name, args] of [
-      ["telegram-list-chats", { limit: 20 }],
-      ["telegram-get-unread", { limit: 20 }],
-      ["telegram-search-chats", { query: "a", limit: 20 }],
-      ["telegram-search-global", { query: "a", limit: 20 }],
-    ] as const) {
+    for (const [name, args] of LISTINGS) {
       const out = text(await call(name, args));
       assert.match(out, /FV Hokimligi/, name);
       assert.match(out, /Team/, name);
@@ -222,9 +265,20 @@ describe("chat allowlist — ticked chats", () => {
 
   it("rules are per user", async () => {
     const list = store();
-    tick(list, "u1", "@fvhokimligi");
+    tick(list, "u1", "-100555");
     const { call } = register(() => list.forUser("u2"));
-    assert.match(text(await call("telegram-read-messages", { chatId: "@fvhokimligi" })), /not in your readable list/);
+    assert.match(text(await call("telegram-read-messages", { chatId: "-100555" })), /not in your readable list/);
+  });
+});
+
+describe("listing limits", () => {
+  it("a huge limit is capped before Telegram is asked", async () => {
+    const { call, argsOf } = register(() => store().forUser("u1"));
+    await call("telegram-read-messages", { chatId: "@fvhokimligi", limit: 5000 });
+    assert.equal(argsOf.getMessages?.[1], 100);
+    await call("telegram-list-chats", { limit: 5000 });
+    const p = argsOf["client.getDialogs"]?.[0] as { limit: number };
+    assert.ok(p.limit <= 300, `dialog fetch limit ${p.limit}`);
   });
 });
 

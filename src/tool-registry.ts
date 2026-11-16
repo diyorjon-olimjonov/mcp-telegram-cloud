@@ -15,9 +15,12 @@ import { getActiveSpanContext, SpanKind, withSpan } from "./telemetry/tracer.js"
 import { toolErrorText } from "./tool-error-text.js";
 import {
   allowlistActive,
+  allowlistAnswer,
   chatNotSelectedMsg,
   checkChatArgs,
   isToolExposed,
+  LIMIT_CAP,
+  LIMIT_CAPPED_TOOLS,
   restrictToGroupsAndChannels,
   type ToolPolicy,
 } from "./tool-policy.js";
@@ -382,6 +385,16 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
       const preErr = tool.preValidate?.(args);
       if (preErr) return preErr;
 
+      // Rate protection: a listing/reading call can never ask Telegram for more than LIMIT_CAP items.
+      if (
+        opts.policy &&
+        LIMIT_CAPPED_TOOLS.has(tool.name) &&
+        typeof args.limit === "number" &&
+        args.limit > LIMIT_CAP
+      ) {
+        args.limit = LIMIT_CAP;
+      }
+
       if (isDestructive && opts.checkDestructive) {
         const destErr = opts.checkDestructive(tool.name, args);
         if (destErr) return { content: [{ type: "text", text: destErr }], isError: true };
@@ -482,6 +495,18 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
             // the same deadline as the handler: the lookup is a Telegram round-trip too.
             const chatRefusal = async (): Promise<CallToolResult | null> => {
               if (!chatGate) return null;
+              if (allowed) {
+                // list-chats / get-unread: one dialog fetch, filtered by the allowlist
+                // (public-by-default needs the entities' @usernames), never an unexplained empty list.
+                const listed = await allowlistAnswer(
+                  tool.name,
+                  args,
+                  telegram,
+                  allowed,
+                  opts.chatSettingsUrl ?? "/my/chats",
+                );
+                if (listed !== null) return { content: [{ type: "text", text: listed }] };
+              }
               const refusal = await checkChatArgs(
                 args,
                 telegram,

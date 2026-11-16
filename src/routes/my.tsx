@@ -25,6 +25,8 @@ export interface MyRoutesDeps {
   oauth: Pick<OAuthProvider, "validateToken" | "getBrowserSessionUser">;
   /** TOOL_MODE=read-only: no destructive tools exist, so the opt-in toggle is hidden and locked. */
   readOnlyMode?: boolean;
+  /** Access-key gate on: signed-out visitors go to /my/key instead of the QR login. */
+  keyLogin?: boolean;
 }
 
 /**
@@ -65,7 +67,9 @@ function resolveUploader(c: Context, deps: MyRoutesDeps): UploadCaller | null {
   return userId ? { userId, via: "cookie" } : null;
 }
 
-function unauthorizedRedirect(c: Context): Response {
+function unauthorizedRedirect(c: Context, keyLogin?: boolean): Response {
+  // Access-key gate on: sign in to the settings with the access key (/my/key), not a new QR.
+  if (keyLogin) return c.redirect(`${config.issuer}/my/key?next=/my/settings`, 302);
   return c.redirect(`${config.issuer}/login`, 302);
 }
 
@@ -153,7 +157,7 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
 
   app.get("/uploads", async (c) => {
     const userId = requireUser(c, deps);
-    if (!userId) return unauthorizedRedirect(c);
+    if (!userId) return unauthorizedRedirect(c, deps.keyLogin);
 
     const flash = c.req.query("flash") ?? undefined;
     const rows = uploads.listForUser(userId, 50);
@@ -281,7 +285,7 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
 
   app.get("/settings", async (c) => {
     const userId = requireUser(c, deps);
-    if (!userId) return unauthorizedRedirect(c);
+    if (!userId) return unauthorizedRedirect(c, deps.keyLogin);
 
     if (deps.readOnlyMode) {
       // No write or destructive tools are registered in read-only mode, so there is
@@ -313,7 +317,7 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
 
   app.post("/settings", async (c) => {
     const userId = requireUser(c, deps);
-    if (!userId) return unauthorizedRedirect(c);
+    if (!userId) return unauthorizedRedirect(c, deps.keyLogin);
 
     // CSRF: same-origin only. The form is HTML-POST'ed without a token, so we
     // require the Origin (or Referer fallback) to parse to an URL whose .origin
@@ -342,7 +346,7 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
 
   app.get("/audit", async (c) => {
     const userId = requireUser(c, deps);
-    if (!userId) return unauthorizedRedirect(c);
+    if (!userId) return unauthorizedRedirect(c, deps.keyLogin);
 
     const rows = destructive.listForUser(userId, 100);
 

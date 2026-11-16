@@ -233,7 +233,7 @@ export const MY_CHATS_JS = `"use strict";
     try {
       const url = "/my/chats/data" + (next ? "?before=" + encodeURIComponent(next) : "");
       const res = await fetch(url, { credentials: "same-origin", headers: { accept: "application/json" } });
-      if (res.status === 401) { location.href = "/login"; return; }
+      if (res.status === 401) { location.href = "/my/key?next=/my/chats"; return; }
       if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
       if (firstLoad) for (const s of data.selected) selected.set(s.id, s);
@@ -288,7 +288,7 @@ export function createMyChatsRoutes(deps: MyChatsDeps): Hono {
 
   app.get("/chats", (c) => {
     const userId = requireUser(c, deps);
-    if (!userId) return c.redirect(`${config.issuer}/login`, 302);
+    if (!userId) return c.redirect(`${config.issuer}/my/key?next=/my/chats`, 302);
     c.header("Cache-Control", "no-store");
     return c.html(<MyChatsPage username={userId} />);
   });

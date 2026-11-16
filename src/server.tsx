@@ -28,6 +28,7 @@ import { createLoginRoutes } from "./routes/login.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
 import { createMyRoutes } from "./routes/my.js";
 import { createMyChatsRoutes } from "./routes/my-chats.js";
+import { createMyKeyRoutes } from "./routes/my-key.js";
 import { createOAuthRoutes, createOAuthWellKnownRoutes } from "./routes/oauth.js";
 import { createQrPasswordRoutes } from "./routes/qr-password.js";
 import { createReviewRoutes } from "./routes/review.js";
@@ -340,8 +341,21 @@ app.route(
     downloads,
     oauth,
     readOnlyMode: config.toolPolicy.mode === "read-only",
+    keyLogin: access.enabled,
   }),
 );
+// Website settings are opened with the access key handed out to each person.
+if (access.enabled) {
+  app.route(
+    "/my",
+    createMyKeyRoutes({
+      access,
+      sessions,
+      oauth,
+      defaultNext: allowlistActive(config.toolPolicy) ? "/my/chats" : "/my/settings",
+    }),
+  );
+}
 app.route("/accounts", createAccountsRoutes({ sessions, access }));
 // Directory-review access: hands a reviewer the demo session so the OAuth fast
 // path can skip the QR code they have no way to scan.

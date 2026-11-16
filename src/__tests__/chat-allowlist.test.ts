@@ -342,7 +342,7 @@ describe("/my/chats page", () => {
   it("requires a signed-in browser session", async () => {
     const res = await app({ signedIn: false }).get("/my/chats");
     assert.equal(res.status, 302);
-    assert.match(res.headers.get("location") ?? "", /\/login$/);
+    assert.match(res.headers.get("location") ?? "", /\/my\/key\?next=\/my\/chats$/);
     assert.equal((await app({ signedIn: false }).get("/my/chats/data")).status, 401);
   });
 

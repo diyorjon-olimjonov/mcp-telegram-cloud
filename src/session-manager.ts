@@ -503,6 +503,15 @@ export class SessionManager {
     return row?.telegram_id ?? null;
   }
 
+  /** Session row key (user id) pinned to a numeric Telegram id, or null. Used by access-key sign-in on /my. */
+  findUserIdByTelegramId(telegramId: string): string | null {
+    const row = this.db.prepare("SELECT user_id FROM user_sessions WHERE telegram_id = ?").get(telegramId) as
+      | { user_id: string }
+      | undefined
+      | null;
+    return row?.user_id ?? null;
+  }
+
   /**
    * Row key for a Telegram account that just proved itself with a QR scan, or null when
    * that cannot be decided right now (the caller asks the user to retry).

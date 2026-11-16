@@ -105,8 +105,10 @@ Claude → **Settings → Connectors → Add custom connector** →
 `https://<domain>/mcp` → **Connect** → enter your key → scan the QR with Telegram
 (Settings → Devices → Link Desktop Device).
 
-Then open `https://<domain>/my/chats` **in the same browser** (the QR login
-signed it in) and tick the groups/channels Claude may read — with
+Then open `https://<domain>/my/chats` and tick the groups/channels Claude may
+read. It asks for the **same access key** (any browser or phone; the sign-in
+lasts 12 hours and the key only opens the settings of the Telegram account it
+is bound to, so it works only after that person has connected once) — with
 `CHAT_ALLOWLIST=on` (default) nothing is readable until you do. The page has a
 search box, shows the 300 most recent dialogs (then "Ko'proq ko'rsatish"), pins
 ticked chats on top with "N ta tanlangan", and is the only place these rules

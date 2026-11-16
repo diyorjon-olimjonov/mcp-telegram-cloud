@@ -194,6 +194,16 @@ export class AccessGate {
     return tx();
   }
 
+  /** Telegram id bound to `label` under its CURRENT key, or null (unbound, removed or re-issued). */
+  boundTelegramId(label: string): string | null {
+    const hex = this.keys.get(label)?.toString("hex");
+    if (!hex) return null;
+    const row = this.db
+      .prepare("SELECT telegram_id, key_hash FROM access_key_bindings WHERE label = ?")
+      .get(label) as BindingRow | null;
+    return row && row.key_hash === hex ? row.telegram_id : null;
+  }
+
   /** A Telegram account may use the server iff a binding of it is backed by a listed key. */
   isTelegramIdAllowed(telegramId: string): boolean {
     if (!this.enabled) return true;

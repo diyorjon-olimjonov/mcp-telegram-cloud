@@ -67,6 +67,7 @@ RAILWAY_RUN_UID=0
 ACCESS_KEYS=<the single line printed in step 1>
 TOOL_MODE=read-only
 CHAT_POLICY=channels-and-groups
+CHAT_ALLOWLIST=on
 FREE_TIER_LIMIT=300
 USAGE_LOG_RETENTION_DAYS=30
 ```
@@ -102,7 +103,14 @@ Notes:
 
 Claude → **Settings → Connectors → Add custom connector** →
 `https://<domain>/mcp` → **Connect** → enter your key → scan the QR with Telegram
-(Settings → Devices → Link Desktop Device). Then try:
+(Settings → Devices → Link Desktop Device).
+
+Then open `https://<domain>/my/chats` **in the same browser** (the QR login
+signed it in) and tick the groups/channels Claude may read — with
+`CHAT_ALLOWLIST=on` (default) nothing is readable until you do. The page has a
+search box, shows the 300 most recent dialogs (then "Ko'proq ko'rsatish"), pins
+ticked chats on top with "N ta tanlangan", and is the only place these rules
+can change. Then try:
 
 > list my channels and show the last 3 posts of @fvhokimligi
 
@@ -147,6 +155,7 @@ Rules enforced by the server:
 | `TOOL_MODE` | `read-only`, `full` | `read-only` | `read-only`: only tools annotated `readOnlyHint=true`; others are absent from `tools/list` and refused by name; the destructive toggle on `/my/settings` is hidden. Unknown value stops the boot. |
 | `HIDDEN_TOOLS` | comma list, `none`, `default,…` | default list | Removes tools in every mode. Unknown names are logged at boot. |
 | `CHAT_POLICY` | `channels-and-groups`, `all` | `channels-and-groups` | Every chat argument must be a group/channel (checked before the Telegram call; unresolvable ⇒ refused); listings drop private chats and bots; unfilterable cross-chat tools are absent. Applies in both tool modes. |
+| `CHAT_ALLOWLIST` | `on`, `off` | `on` | With `channels-and-groups`: only chats the user ticked on `/my/chats` are readable (deny by default); listings show only ticked chats; `telegram-get-groups-for-discussion` and `telegram-get-my-boosts` are absent. No MCP tool can read or change the rules. |
 
 Default `HIDDEN_TOOLS`:
 `telegram-get-contacts`, `telegram-get-contact-requests`, `telegram-get-profile`,

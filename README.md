@@ -54,6 +54,11 @@ in front (Traefik, nginx + certbot, Caddy, managed LB). See
 [`docs/self-hosting.md`](./docs/self-hosting.md) for the threat model,
 hardening checklist, and incident response.
 
+**Railway + access keys:** [`docs/railway.md`](./docs/railway.md) covers this
+fork's invite-only setup — access keys before the QR login, read-only tools
+(`TOOL_MODE`), hidden personal-data tools (`HIDDEN_TOOLS`) and the
+channels-and-groups chat policy (`CHAT_POLICY`).
+
 > ⚠️ The session database stores live MTProto session strings in
 > plaintext. Read [`docs/self-hosting.md`](./docs/self-hosting.md)
 > §Threat model before running this in production.

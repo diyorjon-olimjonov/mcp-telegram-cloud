@@ -165,6 +165,10 @@ export const ReadOnlySettingsPage: FC<{ username: string }> = (props) => (
         <br />
         Read-only mode: write and destructive tools are disabled on this server.
       </p>
+      <div class={sectionLabel}>Guruh va kanallar</div>
+      <p>
+        <a href="/my/chats">O'qiladigan guruh va kanallarni tanlash / Choose readable groups and channels →</a>
+      </p>
     </div>
   </Layout>
 );

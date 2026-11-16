@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
+import type { AllowedChats } from "./chat-allowlist.js";
 import type { DownloadStore } from "./download-store.js";
 import type { SessionManager } from "./session-manager.js";
 import { type ArgAliases, buildArgAliases } from "./tool-call-interceptor.js";
@@ -78,6 +79,10 @@ export interface RegisterAllowedToolsExtras {
   clientName?: string;
   /** TOOL_MODE / HIDDEN_TOOLS exposure policy (see tool-policy.ts). */
   policy?: ToolPolicy;
+  /** CHAT_ALLOWLIST: this user's ticked chats (read per call; handlers never see it). */
+  allowedChats?: () => AllowedChats;
+  /** Absolute URL of /my/chats for refusal messages. */
+  chatSettingsUrl?: string;
 }
 
 export function registerAllAllowedTools(
@@ -108,5 +113,7 @@ export function registerAllAllowedTools(
     ...(extras?.onToolTimeout !== undefined && { onToolTimeout: extras.onToolTimeout }),
     ...(extras?.clientName !== undefined && { clientName: extras.clientName }),
     ...(extras?.policy !== undefined && { policy: extras.policy }),
+    ...(extras?.allowedChats !== undefined && { allowedChats: extras.allowedChats }),
+    ...(extras?.chatSettingsUrl !== undefined && { chatSettingsUrl: extras.chatSettingsUrl }),
   });
 }

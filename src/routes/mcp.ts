@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { type AccessGate, cutOffUser } from "../access-keys.js";
+import type { ChatAllowlist } from "../chat-allowlist.js";
 import { config } from "../config.js";
 import type { DestructiveGuard } from "../destructive-guard.js";
 import { logger, logUser } from "../logger.js";
@@ -21,6 +22,8 @@ export interface McpRoutesDeps {
   uploads: UploadStore;
   /** Access-key gate: re-checked on every request. Absent ⇒ no check. */
   access?: AccessGate;
+  /** CHAT_ALLOWLIST store (per-user ticked chats). */
+  allowlist?: Pick<ChatAllowlist, "forUser">;
 }
 
 /**
@@ -34,7 +37,7 @@ export interface McpRoutesDeps {
  */
 export function registerMcpRoutes(
   app: Hono,
-  { oauth, sessions, usage, destructive, uploads, access }: McpRoutesDeps,
+  { oauth, sessions, usage, destructive, uploads, access, allowlist }: McpRoutesDeps,
 ): void {
   // Wildcard origin is deliberate and safe HERE, because this endpoint is
   // Bearer-only: identity comes from an OAuth access token in the Authorization
@@ -113,7 +116,7 @@ export function registerMcpRoutes(
       );
     }
 
-    return handleMcpRequest(sessions, usage, destructive, uploads, userId, clientName, c.req.raw);
+    return handleMcpRequest(sessions, usage, destructive, uploads, userId, clientName, c.req.raw, allowlist);
   };
 
   app.all("/mcp", handler);

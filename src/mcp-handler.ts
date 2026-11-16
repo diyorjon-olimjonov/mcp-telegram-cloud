@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
 import { isAuthErrorMessage } from "./auth-errors.js";
+import type { ChatAllowlist } from "./chat-allowlist.js";
 import { config, iconPng256Url, iconPngUrl, iconUrl } from "./config.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
 import { type DestructiveGuard, summarizeArgs } from "./destructive-guard.js";
@@ -363,12 +364,14 @@ export async function handleMcpRequest(
   userId: string,
   clientName: string,
   req: Request,
+  /** CHAT_ALLOWLIST source; absent with the allowlist on ⇒ nothing readable (fail closed). */
+  allowlist?: Pick<ChatAllowlist, "forUser">,
 ): Promise<Response> {
   // Counted around every path below, including the error paths, so a throw
   // cannot leak a permanently "in-flight" request and block shutdown forever.
   inFlightRequests++;
   try {
-    return await handleMcpRequestInner(sessions, usage, destructive, uploads, userId, clientName, req);
+    return await handleMcpRequestInner(sessions, usage, destructive, uploads, userId, clientName, req, allowlist);
   } finally {
     inFlightRequests--;
   }
@@ -382,6 +385,7 @@ async function handleMcpRequestInner(
   userId: string,
   clientName: string,
   req: Request,
+  allowlist?: Pick<ChatAllowlist, "forUser">,
 ): Promise<Response> {
   // Check for existing session via header
   const sessionId = req.headers.get("mcp-session-id");
@@ -648,6 +652,8 @@ async function handleMcpRequestInner(
       onToolTimeout,
       clientName,
       policy: config.toolPolicy,
+      ...(allowlist && { allowedChats: () => allowlist.forUser(userId) }),
+      chatSettingsUrl: `${config.issuer}/my/chats`,
     },
   );
 

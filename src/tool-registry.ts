@@ -3,6 +3,7 @@ import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/s
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
 import { isAuthError } from "./auth-errors.js";
+import type { AllowedChats } from "./chat-allowlist.js";
 // Aliased: `config` is shadowed by a local per-tool registration object below.
 import { config as appConfig } from "./config.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
@@ -12,7 +13,14 @@ import type { SessionManager } from "./session-manager.js";
 import { incr, observe, TOOL_CALLS, TOOL_DURATION, TOOL_TIMEOUTS } from "./telemetry/metrics.js";
 import { getActiveSpanContext, SpanKind, withSpan } from "./telemetry/tracer.js";
 import { toolErrorText } from "./tool-error-text.js";
-import { checkChatArgs, isToolExposed, restrictToGroupsAndChannels, type ToolPolicy } from "./tool-policy.js";
+import {
+  allowlistActive,
+  chatNotSelectedMsg,
+  checkChatArgs,
+  isToolExposed,
+  restrictToGroupsAndChannels,
+  type ToolPolicy,
+} from "./tool-policy.js";
 import { deriveTitle, isGuardedDestructive } from "./tools/helpers.js";
 import type { UploadStore } from "./upload-store.js";
 import type { fetchUrlSafely } from "./url-fetcher.js";
@@ -294,6 +302,10 @@ export interface RegisterAllOptions {
   baseUrl?: string;
   /** Server-wide exposure policy (TOOL_MODE / HIDDEN_TOOLS). Absent ⇒ every tool. */
   policy?: ToolPolicy;
+  /** CHAT_ALLOWLIST: this user's ticked chats, read per call. Never exposed to tool handlers. */
+  allowedChats?: () => AllowedChats;
+  /** Absolute URL of /my/chats, quoted in "not in your readable list" refusals. */
+  chatSettingsUrl?: string;
 }
 
 /** Answer for a call that names a tool the policy hides (defence in depth: such tools are not registered). */
@@ -449,8 +461,13 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
             // CHAT_POLICY=channels-and-groups: listings/searches see only groups and channels.
             // `handlerClient` stays the real instance — timeout/revocation fencing compares identity.
             const chatGate = opts.policy?.chatPolicy === "channels-and-groups" && telegram !== undefined;
+            // CHAT_ALLOWLIST: read fresh on every call so a change on /my/chats applies at once.
+            // No source wired ⇒ empty list ⇒ nothing readable (fail closed).
+            const allowed = allowlistActive(opts.policy)
+              ? (opts.allowedChats?.() ?? { marked: new Set<string>(), bare: new Set<string>() })
+              : undefined;
             const deps: ToolDeps = {
-              telegram: chatGate ? restrictToGroupsAndChannels(telegram) : telegram,
+              telegram: chatGate ? restrictToGroupsAndChannels(telegram, allowed) : telegram,
               ...(sourceAccountId !== undefined && { sourceAccountId }),
               ...(sourceAttachmentId != null && { sourceAttachmentId }),
               ...(opts.userId !== undefined && { userId: opts.userId }),
@@ -465,7 +482,12 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
             // the same deadline as the handler: the lookup is a Telegram round-trip too.
             const chatRefusal = async (): Promise<CallToolResult | null> => {
               if (!chatGate) return null;
-              const refusal = await checkChatArgs(args, telegram, isAuthError);
+              const refusal = await checkChatArgs(
+                args,
+                telegram,
+                isAuthError,
+                allowed && { allowed, refusal: chatNotSelectedMsg(opts.chatSettingsUrl ?? "/my/chats") },
+              );
               if (!refusal) return null;
               logger.info(`Chat policy refused ${tool.name}`, {
                 component: "tools",

@@ -13,6 +13,8 @@
  *   `HIDDEN_TOOLS=default,telegram-get-sessions` extends it.
  */
 
+import { type AllowedChats, chatIds } from "./chat-allowlist.js";
+
 export type ToolMode = "read-only" | "full";
 
 /**
@@ -54,6 +56,8 @@ export interface ToolPolicy {
   readonly hidden: ReadonlySet<string>;
   /** CHAT_POLICY; absent ⇒ "all" (upstream behavior, unit-test fixtures). */
   readonly chatPolicy?: ChatPolicy;
+  /** CHAT_ALLOWLIST=on: with channels-and-groups, only chats the user ticked on /my/chats. */
+  readonly chatAllowlist?: boolean;
 }
 
 export function parseToolMode(raw: string | undefined): ToolMode {
@@ -87,6 +91,7 @@ export function isToolExposed(
   if (policy.hidden.has(tool.name)) return false;
   if (policy.mode === "read-only" && tool.annotations.readOnlyHint !== true) return false;
   if (policy.chatPolicy === "channels-and-groups" && CHANNELS_ONLY_ABSENT_TOOLS.has(tool.name)) return false;
+  if (allowlistActive(policy) && ALLOWLIST_ABSENT_TOOLS.has(tool.name)) return false;
   return true;
 }
 
@@ -137,6 +142,39 @@ export const CHAT_BLOCKED_MSG =
 export const CHAT_UNVERIFIED_MSG =
   "Could not verify that this chat is a group or channel, so it was not read. Use the @username or numeric ID from telegram-list-chats.";
 
+// ─── Per-user chat allowlist (CHAT_ALLOWLIST) ────────────────────────────
+
+/** `CHAT_ALLOWLIST=on` (default) | `off`. Only meaningful with CHAT_POLICY=channels-and-groups. */
+export function parseChatAllowlist(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase();
+  if (!v || v === "on") return true;
+  if (v === "off") return false;
+  throw new Error(`CHAT_ALLOWLIST must be "on" or "off", got "${raw}".`);
+}
+
+export function allowlistActive(policy: ToolPolicy | undefined): boolean {
+  return policy?.chatPolicy === "channels-and-groups" && policy.chatAllowlist === true;
+}
+
+/**
+ * Tools that list groups/channels without a chat argument and whose output
+ * cannot be matched to the allowlist (boosted channels, discussion-group
+ * candidates). Absent while the allowlist is active, so names of chats the user
+ * did not tick never reach the model.
+ */
+export const ALLOWLIST_ABSENT_TOOLS: ReadonlySet<string> = new Set([
+  "telegram-get-groups-for-discussion",
+  "telegram-get-my-boosts",
+]);
+
+/** Refusal for a group/channel the user has not ticked; points at the only place rules change. */
+export function chatNotSelectedMsg(settingsUrl: string): string {
+  return (
+    "This group or channel is not in your readable list. The account owner can tick it at " +
+    `${settingsUrl} (rules can only be changed there).`
+  );
+}
+
 /** GramJS entity classes that are groups or channels (basic groups, supergroups, broadcast channels). */
 const GROUP_OR_CHANNEL = new Set(["Chat", "ChatForbidden", "Channel", "ChannelForbidden"]);
 const SELF_REF = /^@?(me|self|saved|saved messages)$/i;
@@ -150,6 +188,8 @@ export async function checkChatArgs(
   args: Record<string, unknown>,
   telegram: { resolveChat(chatId: string): Promise<unknown> },
   isAuthError: (e: unknown) => boolean = () => false,
+  /** Per-user allowlist (CHAT_ALLOWLIST=on): a group/channel must also be ticked. */
+  allowlist?: { allowed: AllowedChats; refusal: string },
 ): Promise<string | null> {
   for (const key of CHAT_ARG_KEYS) {
     const raw = args[key];
@@ -165,25 +205,42 @@ export async function checkChatArgs(
     }
     const cls = (entity as { className?: unknown } | null)?.className;
     if (typeof cls !== "string" || !GROUP_OR_CHANNEL.has(cls)) return CHAT_BLOCKED_MSG;
+    if (allowlist) {
+      const ids = chatIds(entity);
+      if (!ids || !allowlist.allowed.marked.has(ids.marked)) return allowlist.refusal;
+    }
   }
   return null;
 }
 
-type Typed = { type?: unknown };
+type Typed = { type?: unknown; id?: unknown };
 const isGroupOrChannel = (x: Typed | null | undefined): boolean => x?.type === "group" || x?.type === "channel";
+
+/** Listing ids are marked (`-100…`, `-…`) for dialogs and bare for search results. */
+function isAllowedListing(x: Typed | null | undefined, allowed: AllowedChats | undefined): boolean {
+  if (!isGroupOrChannel(x)) return false;
+  if (!allowed) return true;
+  const id = String(x?.id ?? "");
+  return id.startsWith("-") ? allowed.marked.has(id) : allowed.bare.has(id);
+}
 
 /**
  * Wrap a TelegramService so chat listings and searches only return groups and
  * channels (`type` is "private" for users, bots and Saved Messages). Methods run
  * against the real instance; everything else passes through untouched.
  */
-export function restrictToGroupsAndChannels<T extends object>(telegram: T): T {
+export function restrictToGroupsAndChannels<T extends object>(
+  telegram: T,
+  /** Per-user allowlist: when given, listings also drop every chat that is not ticked. */
+  allowed?: AllowedChats,
+): T {
+  const keep = (x: Typed | null | undefined) => isAllowedListing(x, allowed);
   const filters: Record<string, (out: unknown, args: unknown[]) => unknown> = {
     getDialogs: (out, args) =>
-      args[2] === "private" || args[2] === "contact_requests" ? [] : (out as Typed[]).filter(isGroupOrChannel),
-    getUnreadDialogs: (out) => (out as Typed[]).filter(isGroupOrChannel),
-    searchChats: (out) => (out as Typed[]).filter(isGroupOrChannel),
-    searchGlobal: (out) => (out as { chat?: Typed }[]).filter((m) => isGroupOrChannel(m.chat)),
+      args[2] === "private" || args[2] === "contact_requests" ? [] : (out as Typed[]).filter(keep),
+    getUnreadDialogs: (out) => (out as Typed[]).filter(keep),
+    searchChats: (out) => (out as Typed[]).filter(keep),
+    searchGlobal: (out) => (out as { chat?: Typed }[]).filter((m) => keep(m.chat)),
   };
   return new Proxy(telegram, {
     get(target, prop) {

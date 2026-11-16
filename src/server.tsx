@@ -3,6 +3,7 @@
 import "dotenv/config";
 import { Hono } from "hono";
 import { AccessGate, assertAccessGateConfig } from "./access-keys.js";
+import { ChatAllowlist } from "./chat-allowlist.js";
 import { config, SENTINEL_LOG_HASH_SALT } from "./config.js";
 import { DestructiveGuard } from "./destructive-guard.js";
 import { HTTP_IDLE_TIMEOUT_S } from "./http-timeouts.js";
@@ -26,6 +27,7 @@ import { createAdminRoutes } from "./routes/admin.js";
 import { createLoginRoutes } from "./routes/login.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
 import { createMyRoutes } from "./routes/my.js";
+import { createMyChatsRoutes } from "./routes/my-chats.js";
 import { createOAuthRoutes, createOAuthWellKnownRoutes } from "./routes/oauth.js";
 import { createQrPasswordRoutes } from "./routes/qr-password.js";
 import { createReviewRoutes } from "./routes/review.js";
@@ -33,7 +35,7 @@ import { createStaticRoutes } from "./routes/static.js";
 import { SessionManager } from "./session-manager.js";
 import { flushMetrics, registerGauge, startMetricsFlush, stopMetricsFlush } from "./telemetry/metrics.js";
 import { flushTraces, runDetached, stopTraceFlush } from "./telemetry/tracer.js";
-import { isToolExposed } from "./tool-policy.js";
+import { allowlistActive, isToolExposed } from "./tool-policy.js";
 import { purgeUrlFetchOrphans } from "./tools/uploads.js";
 import { TOOLS } from "./tools.js";
 import { UploadStore } from "./upload-store.js";
@@ -67,13 +69,16 @@ assertAccessGateConfig({
 const sessions = new SessionManager();
 const oauth = new OAuthProvider({ issuer: config.issuer, db: sessions.getDb() });
 const access = new AccessGate(sessions.getDb(), config.accessKeys, { allowOpenSignup: config.allowOpenSignup });
+const chatAllowlist = new ChatAllowlist(sessions.getDb());
 {
   // A misspelt HIDDEN_TOOLS entry hides nothing — say so instead of failing silently.
   const known = new Set(TOOLS.map((t) => t.name));
   const unknown = [...config.toolPolicy.hidden].filter((n) => !known.has(n));
   const exposed = TOOLS.filter((t) => isToolExposed(t, config.toolPolicy)).length;
   logger.info(
-    `Tool policy: TOOL_MODE=${config.toolPolicy.mode}, ${config.toolPolicy.hidden.size} hidden, ${exposed}/${TOOLS.length} exposed`,
+    `Tool policy: TOOL_MODE=${config.toolPolicy.mode}, CHAT_POLICY=${config.toolPolicy.chatPolicy}, ` +
+      `CHAT_ALLOWLIST=${allowlistActive(config.toolPolicy) ? "on" : "off"}, ` +
+      `${config.toolPolicy.hidden.size} hidden, ${exposed}/${TOOLS.length} exposed`,
     { component: "config", event: "tool_policy.config" },
   );
   if (unknown.length > 0) {
@@ -320,7 +325,11 @@ app.route("/", createStaticRoutes({ sessions }));
 app.route("/", createOAuthWellKnownRoutes(oauth));
 app.route("/oauth", createOAuthRoutes({ oauth, sessions, access }));
 app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
-registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads, access });
+registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads, access, allowlist: chatAllowlist });
+// Per-user group/channel checklist: the only place CHAT_ALLOWLIST rules change.
+if (allowlistActive(config.toolPolicy)) {
+  app.route("/my", createMyChatsRoutes({ sessions, oauth, allowlist: chatAllowlist }));
+}
 app.route("/login", createLoginRoutes({ sessions, oauth, access }));
 app.route(
   "/my",

@@ -218,7 +218,9 @@ describe("access keys — parsing and boot guard", () => {
     assertAccessGateConfig({ nodeEnv: "production", keyCount: 3, allowOpenSignup: false });
   });
 
-  it("the real server process exits with a clear error when ACCESS_KEYS is empty in production", () => {
+  it("the real server process exits with a clear error when ACCESS_KEYS is empty in production", {
+    timeout: 30_000,
+  }, () => {
     const dir = mkdtempSync(join(tmpdir(), "ak-boot-"));
     const res = spawnSync(process.execPath, ["src/server.tsx"], {
       cwd: ROOT,

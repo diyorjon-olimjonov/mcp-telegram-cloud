@@ -8,7 +8,7 @@ import { DOWNLOAD_CHUNK_BYTES, type DownloadStore } from "../download-store.js";
 import { logger, logUser } from "../logger.js";
 import type { OAuthProvider } from "../oauth.js";
 import { AuditPage } from "../pages/AuditPage.js";
-import { SettingsPage } from "../pages/SettingsPage.js";
+import { ReadOnlySettingsPage, SettingsPage } from "../pages/SettingsPage.js";
 import { UploadsPage, type UploadsPageProps } from "../pages/UploadsPage.js";
 import { makeUploadRateLimit } from "../rate-limit.js";
 import { detectRequestLocale, islandScripts, reactPagesAvailable, renderReactPage } from "../react-pages.js";
@@ -23,6 +23,8 @@ export interface MyRoutesDeps {
   downloads?: DownloadStore;
   /** Token validator for the Bearer path on `POST /my/upload` (MCP agents). */
   oauth: Pick<OAuthProvider, "validateToken" | "getBrowserSessionUser">;
+  /** TOOL_MODE=read-only: no destructive tools exist, so the opt-in toggle is hidden and locked. */
+  readOnlyMode?: boolean;
 }
 
 /**
@@ -281,6 +283,12 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
     const userId = requireUser(c, deps);
     if (!userId) return unauthorizedRedirect(c);
 
+    if (deps.readOnlyMode) {
+      // No write or destructive tools are registered in read-only mode, so there is
+      // nothing to opt in to: show the mode instead of the toggle.
+      return c.html(<ReadOnlySettingsPage username={userId} />);
+    }
+
     const ok = c.req.query("ok");
     const flash = ok === "on" ? "Destructive tools enabled." : ok === "off" ? "Destructive tools disabled." : undefined;
 
@@ -315,6 +323,7 @@ export function createMyRoutes(deps: MyRoutesDeps): Hono {
     if (!headerValue || !originMatchesIssuer(headerValue)) {
       return c.text("forbidden", 403);
     }
+    if (deps.readOnlyMode) return c.text("Read-only mode: destructive tools are disabled on this server.", 403);
 
     const form = await c.req.formData();
     const next = form.get("enabled") === "1";

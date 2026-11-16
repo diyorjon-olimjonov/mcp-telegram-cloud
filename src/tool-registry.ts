@@ -12,6 +12,7 @@ import type { SessionManager } from "./session-manager.js";
 import { incr, observe, TOOL_CALLS, TOOL_DURATION, TOOL_TIMEOUTS } from "./telemetry/metrics.js";
 import { getActiveSpanContext, SpanKind, withSpan } from "./telemetry/tracer.js";
 import { toolErrorText } from "./tool-error-text.js";
+import { isToolExposed, type ToolPolicy } from "./tool-policy.js";
 import { deriveTitle, isGuardedDestructive } from "./tools/helpers.js";
 import type { UploadStore } from "./upload-store.js";
 import type { fetchUrlSafely } from "./url-fetcher.js";
@@ -291,7 +292,13 @@ export interface RegisterAllOptions {
   sessions?: SessionManager;
   /** v2.32.0: piped through to {@link ToolDeps.baseUrl}. */
   baseUrl?: string;
+  /** Server-wide exposure policy (TOOL_MODE / HIDDEN_TOOLS). Absent ⇒ every tool. */
+  policy?: ToolPolicy;
 }
+
+/** Answer for a call that names a tool the policy hides (defence in depth: such tools are not registered). */
+export const TOOL_NOT_AVAILABLE_MSG =
+  "This tool is not available on this server (read-only mode or hidden by the operator).";
 
 /**
  * Wire a list of ToolDefinition entries onto an MCP server, applying common cross-cutting concerns
@@ -303,6 +310,10 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
   const caller = callerLogFields(opts);
 
   for (const tool of tools) {
+    // TOOL_MODE / HIDDEN_TOOLS: a hidden tool is never registered, so it is absent from
+    // tools/list and the SDK rejects a tools/call naming it as an unknown tool.
+    if (opts.policy && !isToolExposed(tool, opts.policy)) continue;
+
     if (tool.requiresEnv && process.env[tool.requiresEnv] !== "1") {
       // Registration runs once per MCP session, but which tools are env-gated is a
       // process-level constant, so re-logging it per session said nothing new and made
@@ -345,6 +356,10 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
     const isDestructive = isGuardedDestructive(tool.annotations);
 
     server.registerTool(tool.name, config, async (rawArgs: unknown) => {
+      // Defence in depth: never run a tool the policy hides, however it got here.
+      if (opts.policy && !isToolExposed(tool, opts.policy)) {
+        return { content: [{ type: "text", text: TOOL_NOT_AVAILABLE_MSG }], isError: true };
+      }
       opts.onToolCall?.(tool.name);
       const limitErr = opts.checkRateLimit?.(tool.name);
       if (limitErr) return { content: [{ type: "text", text: limitErr }] };

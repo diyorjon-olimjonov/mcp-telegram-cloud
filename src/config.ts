@@ -1,4 +1,5 @@
 import { parseAccessKeys } from "./access-keys.js";
+import { parseHiddenTools, parseToolMode, type ToolPolicy } from "./tool-policy.js";
 
 /** Sentinel default for LOG_HASH_SALT — checked at startup to flag insecure
  * configs. Exported so the warning in server.tsx stays in sync if the value
@@ -149,6 +150,13 @@ export const config = {
   accessKeys: parseAccessKeys(process.env.ACCESS_KEYS),
   /** `ALLOW_OPEN_SIGNUP=1`: run without ACCESS_KEYS on purpose (anyone can sign in). */
   allowOpenSignup: process.env.ALLOW_OPEN_SIGNUP === "1",
+
+  /** Which tools exist at all: TOOL_MODE (read-only|full, default read-only) + HIDDEN_TOOLS.
+   * Applied by mcp-handler for every MCP session. See tool-policy.ts. */
+  toolPolicy: {
+    mode: parseToolMode(process.env.TOOL_MODE),
+    hidden: parseHiddenTools(process.env.HIDDEN_TOOLS),
+  } satisfies ToolPolicy as ToolPolicy,
 
   openaiAppsChallenge: optional(process.env.OPENAI_APPS_CHALLENGE, ""),
   adminToken: process.env.ADMIN_TOKEN ?? "",

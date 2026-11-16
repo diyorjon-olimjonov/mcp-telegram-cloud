@@ -647,6 +647,7 @@ async function handleMcpRequestInner(
       baseUrl: config.issuer,
       onToolTimeout,
       clientName,
+      policy: config.toolPolicy,
     },
   );
 

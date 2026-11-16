@@ -33,7 +33,9 @@ import { createStaticRoutes } from "./routes/static.js";
 import { SessionManager } from "./session-manager.js";
 import { flushMetrics, registerGauge, startMetricsFlush, stopMetricsFlush } from "./telemetry/metrics.js";
 import { flushTraces, runDetached, stopTraceFlush } from "./telemetry/tracer.js";
+import { isToolExposed } from "./tool-policy.js";
 import { purgeUrlFetchOrphans } from "./tools/uploads.js";
+import { TOOLS } from "./tools.js";
 import { UploadStore } from "./upload-store.js";
 import { UsageTracker } from "./usage.js";
 
@@ -65,6 +67,22 @@ assertAccessGateConfig({
 const sessions = new SessionManager();
 const oauth = new OAuthProvider({ issuer: config.issuer, db: sessions.getDb() });
 const access = new AccessGate(sessions.getDb(), config.accessKeys, { allowOpenSignup: config.allowOpenSignup });
+{
+  // A misspelt HIDDEN_TOOLS entry hides nothing — say so instead of failing silently.
+  const known = new Set(TOOLS.map((t) => t.name));
+  const unknown = [...config.toolPolicy.hidden].filter((n) => !known.has(n));
+  const exposed = TOOLS.filter((t) => isToolExposed(t, config.toolPolicy)).length;
+  logger.info(
+    `Tool policy: TOOL_MODE=${config.toolPolicy.mode}, ${config.toolPolicy.hidden.size} hidden, ${exposed}/${TOOLS.length} exposed`,
+    { component: "config", event: "tool_policy.config" },
+  );
+  if (unknown.length > 0) {
+    logger.warn(`HIDDEN_TOOLS names no such tool: ${unknown.join(", ")}`, {
+      component: "config",
+      event: "tool_policy.unknown_hidden",
+    });
+  }
+}
 {
   const pruned = access.pruneStaleBindings();
   logger.info(
@@ -304,7 +322,17 @@ app.route("/oauth", createOAuthRoutes({ oauth, sessions, access }));
 app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
 registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads, access });
 app.route("/login", createLoginRoutes({ sessions, oauth, access }));
-app.route("/my", createMyRoutes({ destructive, sessions, uploads, downloads, oauth }));
+app.route(
+  "/my",
+  createMyRoutes({
+    destructive,
+    sessions,
+    uploads,
+    downloads,
+    oauth,
+    readOnlyMode: config.toolPolicy.mode === "read-only",
+  }),
+);
 app.route("/accounts", createAccountsRoutes({ sessions, access }));
 // Directory-review access: hands a reviewer the demo session so the OAuth fast
 // path can skip the QR code they have no way to scan.

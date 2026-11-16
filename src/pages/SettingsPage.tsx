@@ -149,3 +149,22 @@ export const SettingsPage: FC<SettingsPageProps> = ({ username, enabled, todayCo
     </Layout>
   );
 };
+
+/**
+ * `/my/settings` when TOOL_MODE=read-only: no write or destructive tool is
+ * registered, so there is no opt-in toggle to show.
+ */
+export const ReadOnlySettingsPage: FC<{ username: string }> = (props) => (
+  <Layout title={`${config.brandName} — Settings`}>
+    <div class={cx(card, settingsCard)}>
+      <h1 class={title}>Settings</h1>
+      <p class={subtitle}>Signed in as @{props.username}</p>
+      <div class={sectionLabel}>Mode</div>
+      <p>
+        Faqat o'qish rejimi: bu serverda yozish va o'chirish vositalari o'chirilgan.
+        <br />
+        Read-only mode: write and destructive tools are disabled on this server.
+      </p>
+    </div>
+  </Layout>
+);

@@ -3,6 +3,7 @@ import type { TelegramService } from "@overpod/mcp-telegram/service";
 import type { DownloadStore } from "./download-store.js";
 import type { SessionManager } from "./session-manager.js";
 import { type ArgAliases, buildArgAliases } from "./tool-call-interceptor.js";
+import type { ToolPolicy } from "./tool-policy.js";
 import {
   type DestructiveCheck,
   type DestructiveRecord,
@@ -75,6 +76,8 @@ export interface RegisterAllowedToolsExtras {
   onToolTimeout?: OnToolTimeout;
   /** MCP client name, logged on tool.duration / tool.error for per-client attribution. */
   clientName?: string;
+  /** TOOL_MODE / HIDDEN_TOOLS exposure policy (see tool-policy.ts). */
+  policy?: ToolPolicy;
 }
 
 export function registerAllAllowedTools(
@@ -104,5 +107,6 @@ export function registerAllAllowedTools(
     ...(extras?.baseUrl !== undefined && { baseUrl: extras.baseUrl }),
     ...(extras?.onToolTimeout !== undefined && { onToolTimeout: extras.onToolTimeout }),
     ...(extras?.clientName !== undefined && { clientName: extras.clientName }),
+    ...(extras?.policy !== undefined && { policy: extras.policy }),
   });
 }

@@ -90,5 +90,7 @@ ENV NODE_ENV=production
 ENV MCP_TELEGRAM_ENABLE_GROUP_CALLS=1
 ENV MCP_TELEGRAM_ENABLE_QUICK_REPLIES=1
 EXPOSE 3000
-VOLUME ["/app/data"]
+# No VOLUME instruction: Railway rejects it. Persistent data lives on a platform
+# volume mounted at /app/data (Railway: Volumes -> mount path /app/data;
+# docker run: -v <name>:/app/data).
 CMD ["bun", "src/server.tsx"]

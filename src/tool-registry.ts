@@ -12,7 +12,7 @@ import type { SessionManager } from "./session-manager.js";
 import { incr, observe, TOOL_CALLS, TOOL_DURATION, TOOL_TIMEOUTS } from "./telemetry/metrics.js";
 import { getActiveSpanContext, SpanKind, withSpan } from "./telemetry/tracer.js";
 import { toolErrorText } from "./tool-error-text.js";
-import { isToolExposed, type ToolPolicy } from "./tool-policy.js";
+import { checkChatArgs, isToolExposed, restrictToGroupsAndChannels, type ToolPolicy } from "./tool-policy.js";
 import { deriveTitle, isGuardedDestructive } from "./tools/helpers.js";
 import type { UploadStore } from "./upload-store.js";
 import type { fetchUrlSafely } from "./url-fetcher.js";
@@ -446,8 +446,11 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
               telegram = undefined as unknown as TelegramService;
             }
             handlerClient = telegram;
+            // CHAT_POLICY=channels-and-groups: listings/searches see only groups and channels.
+            // `handlerClient` stays the real instance — timeout/revocation fencing compares identity.
+            const chatGate = opts.policy?.chatPolicy === "channels-and-groups" && telegram !== undefined;
             const deps: ToolDeps = {
-              telegram,
+              telegram: chatGate ? restrictToGroupsAndChannels(telegram) : telegram,
               ...(sourceAccountId !== undefined && { sourceAccountId }),
               ...(sourceAttachmentId != null && { sourceAttachmentId }),
               ...(opts.userId !== undefined && { userId: opts.userId }),
@@ -457,8 +460,24 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
               ...(opts.sessions !== undefined && { sessions: opts.sessions }),
               ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
             };
+            // Every chat argument must resolve to a group or channel before the tool's own
+            // Telegram call runs (private chats, bots, Saved Messages refused). Runs inside
+            // the same deadline as the handler: the lookup is a Telegram round-trip too.
+            const chatRefusal = async (): Promise<CallToolResult | null> => {
+              if (!chatGate) return null;
+              const refusal = await checkChatArgs(args, telegram, isAuthError);
+              if (!refusal) return null;
+              logger.info(`Chat policy refused ${tool.name}`, {
+                component: "tools",
+                event: "chat_policy.refused",
+                tool: tool.name,
+                ...caller,
+              });
+              return { content: [{ type: "text", text: refusal }], isError: true };
+            };
+            const gated = async (run: () => Promise<CallToolResult>) => (await chatRefusal()) ?? run();
             const result = await withDeadline(`tool:${tool.name}`, toolBudgetMs(tool.name), () =>
-              tool.handler(args, deps),
+              gated(() => tool.handler(args, deps)),
             );
             const duration = Date.now() - start;
             const outcome = result.isError === true ? "error" : "ok";

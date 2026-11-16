@@ -1,5 +1,5 @@
 import { parseAccessKeys } from "./access-keys.js";
-import { parseHiddenTools, parseToolMode, type ToolPolicy } from "./tool-policy.js";
+import { parseChatPolicy, parseHiddenTools, parseToolMode, type ToolPolicy } from "./tool-policy.js";
 
 /** Sentinel default for LOG_HASH_SALT — checked at startup to flag insecure
  * configs. Exported so the warning in server.tsx stays in sync if the value
@@ -156,6 +156,8 @@ export const config = {
   toolPolicy: {
     mode: parseToolMode(process.env.TOOL_MODE),
     hidden: parseHiddenTools(process.env.HIDDEN_TOOLS),
+    /** CHAT_POLICY: channels-and-groups (default) | all. */
+    chatPolicy: parseChatPolicy(process.env.CHAT_POLICY),
   } satisfies ToolPolicy as ToolPolicy,
 
   openaiAppsChallenge: optional(process.env.OPENAI_APPS_CHALLENGE, ""),

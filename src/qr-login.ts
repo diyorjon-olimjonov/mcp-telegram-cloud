@@ -35,6 +35,10 @@ function sseQrHooks(send: Send, loginId: string): QrLoginHooks {
     // SSE abort AND on the 5-minute deadline, so the password wait unwinds with
     // the rest of the attempt instead of lingering until its own 2-min timeout.
     requestPassword: (hint, signal) => {
+      logger.info("QR scanned; waiting for the 2FA cloud password", {
+        component: "qr-login",
+        event: "qr.password_needed",
+      });
       send("password_needed", { loginId, hint: hint ?? "" });
       return awaitPassword(loginId, signal, PASSWORD_ENTRY_TIMEOUT_MS);
     },
@@ -391,6 +395,10 @@ export async function handleOAuthQrLogin(
           // Adopt the live client into the session pool — avoids a duplicate Telegram session.
           await sessions.adoptSession(userId, telegram);
         } else {
+          logger.warn(`QR login ended without success: ${outcome.message ?? "unknown"}`, {
+            component: "oauth-qr",
+            event: "qr.failed",
+          });
           send("error_msg", { message: outcome.message ?? "QR login failed" });
         }
       } catch (err) {

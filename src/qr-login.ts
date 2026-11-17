@@ -1,3 +1,4 @@
+import type { AccountKeys } from "./account-keys.js";
 import { logger, logUser } from "./logger.js";
 import type { OAuthProvider } from "./oauth.js";
 import { type QrLoginHooks, runQrLogin } from "./qr-login-core.js";
@@ -103,6 +104,8 @@ export async function handleQrLogin(
   oauth: Pick<OAuthProvider, "createBrowserHandoff">,
   /** Access-key gate: only accounts already bound to a listed key may sign in here. */
   access?: { enabled: boolean; isTelegramIdAllowed(telegramId: string): boolean },
+  /** Open-signup mode: the account's personal key, made on its first login and shown once. */
+  accountKeys?: Pick<AccountKeys, "issue">,
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
 
@@ -188,12 +191,15 @@ export async function handleQrLogin(
             sessions.saveSessionString(userId, outcome.sessionString, String(me.id));
             await sessions.adoptSession(userId, fresh);
           }
+          const accountKey = accountKeys?.issue(String(me.id)) ?? undefined;
           send("connected", {
             name: me.firstName,
             username: me.username,
             id: me.id,
             // Proof of identity for the browser: traded for the session cookie.
             handoff: oauth.createBrowserHandoff(userId),
+            // Present only the first time: the page shows it once.
+            ...(accountKey && { accountKey }),
           });
         } else {
           send("error_msg", { message: outcome.message ?? "QR login failed" });
@@ -224,6 +230,8 @@ export async function handleOAuthQrLogin(
   signal: AbortSignal,
   /** Access-key gate: bind the verified key to the scanned account before anything is stored. */
   access?: QrAccessOption,
+  /** Open-signup mode: the account's personal key, made on its first login and shown once. */
+  accountKeys?: Pick<AccountKeys, "issue">,
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
 
@@ -357,6 +365,7 @@ export async function handleOAuthQrLogin(
           }
 
           sessions.saveSessionString(userId, outcome.sessionString, String(me.id));
+          const accountKey = accountKeys?.issue(String(me.id)) ?? undefined;
 
           // Create OAuth auth code
           const code = oauth.createAuthCode({
@@ -390,6 +399,9 @@ export async function handleOAuthQrLogin(
             // The only way a browser session is born after QR: the server saw the
             // login finish, so it vouches for this user with a one-time ticket.
             handoff: oauth.createBrowserHandoff(userId),
+            // Present only on the account's first login: the page shows it once
+            // and waits for "continue" before going back to the client.
+            ...(accountKey && { accountKey }),
           });
 
           // Adopt the live client into the session pool — avoids a duplicate Telegram session.

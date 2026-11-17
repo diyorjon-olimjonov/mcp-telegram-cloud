@@ -3,6 +3,7 @@
 import "dotenv/config";
 import { Hono } from "hono";
 import { AccessGate, assertAccessGateConfig } from "./access-keys.js";
+import { AccountKeys } from "./account-keys.js";
 import { ChatAllowlist } from "./chat-allowlist.js";
 import { config, SENTINEL_LOG_HASH_SALT } from "./config.js";
 import { DestructiveGuard } from "./destructive-guard.js";
@@ -71,6 +72,8 @@ const sessions = new SessionManager();
 const oauth = new OAuthProvider({ issuer: config.issuer, db: sessions.getDb() });
 const access = new AccessGate(sessions.getDb(), config.accessKeys, { allowOpenSignup: config.allowOpenSignup });
 const chatAllowlist = new ChatAllowlist(sessions.getDb());
+// Open signup (no ACCESS_KEYS): every account gets its own key on first QR login.
+const accountKeys = access.enabled ? undefined : new AccountKeys(sessions.getDb());
 {
   // A misspelt HIDDEN_TOOLS entry hides nothing — say so instead of failing silently.
   const known = new Set(TOOLS.map((t) => t.name));
@@ -94,7 +97,7 @@ const chatAllowlist = new ChatAllowlist(sessions.getDb());
   logger.info(
     access.enabled
       ? `Access-key gate ON: ${access.labelCount} key(s) listed, ${pruned} stale binding(s) removed`
-      : "Access-key gate OFF (ALLOW_OPEN_SIGNUP=1): any Telegram account can sign in",
+      : "Access-key gate OFF (ALLOW_OPEN_SIGNUP=1): any Telegram account can sign in; personal keys issued on first login",
     { component: "config", event: "access_gate.config" },
   );
 }
@@ -324,14 +327,14 @@ app.use("*", securityHeaders);
 app.use("*", noindex);
 app.route("/", createStaticRoutes({ sessions }));
 app.route("/", createOAuthWellKnownRoutes(oauth));
-app.route("/oauth", createOAuthRoutes({ oauth, sessions, access }));
+app.route("/oauth", createOAuthRoutes({ oauth, sessions, access, accountKeys }));
 app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
 registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads, access, allowlist: chatAllowlist });
 // Per-user group/channel checklist: the only place CHAT_ALLOWLIST rules change.
 if (allowlistActive(config.toolPolicy)) {
   app.route("/my", createMyChatsRoutes({ sessions, oauth, allowlist: chatAllowlist }));
 }
-app.route("/login", createLoginRoutes({ sessions, oauth, access }));
+app.route("/login", createLoginRoutes({ sessions, oauth, access, accountKeys }));
 app.route(
   "/my",
   createMyRoutes({
@@ -341,15 +344,16 @@ app.route(
     downloads,
     oauth,
     readOnlyMode: config.toolPolicy.mode === "read-only",
-    keyLogin: access.enabled,
+    keyLogin: access.enabled || accountKeys !== undefined,
   }),
 );
-// Website settings are opened with the access key handed out to each person.
-if (access.enabled) {
+// Website settings are opened with the access key (handed out, or personal in open-signup mode).
+if (access.enabled || accountKeys) {
   app.route(
     "/my",
     createMyKeyRoutes({
       access,
+      accountKeys,
       sessions,
       oauth,
       defaultNext: allowlistActive(config.toolPolicy) ? "/my/chats" : "/my/settings",

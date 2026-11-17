@@ -107,6 +107,41 @@ if (root) {
 
   const peer = (data: Dict) => `${esc(data.name || "")} (@${esc(data.username || "unknown")})`;
 
+  /**
+   * Open-signup mode: on an account's FIRST login the server sends its personal
+   * access key once. Show it and wait for an explicit "continue" so the person
+   * has time to save it; `then` runs on that click.
+   */
+  const showAccountKey = (key: string, then: () => void) => {
+    showResult(
+      `<div style="background:#F4F4F7;border:1px solid #007AFF;border-radius:12px;padding:20px;margin:20px 0">` +
+        `<h2 style="color:#007AFF;font-size:20px;margin-bottom:8px">Shaxsiy kirish kalitingiz</h2>` +
+        `<p style="font-size:13px;color:#707579;margin-bottom:12px">Your personal access key</p>` +
+        `<div id="account-key" style="font-family:ui-monospace,Menlo,monospace;font-size:22px;letter-spacing:1px;` +
+        `text-align:center;background:#fff;border:1px dashed #007AFF;border-radius:10px;padding:14px;user-select:all">` +
+        `${esc(key)}</div>` +
+        `<p style="margin-top:12px">Bu kalitni hozir saqlab qo'ying — u <b>boshqa ko'rsatilmaydi</b>. ` +
+        `U bilan sozlamalarga (o'qiladigan chatlar ro'yxati) QR kodsiz kirasiz. Unutsangiz, administrator yangisini beradi.</p>` +
+        `<p style="font-size:13px;color:#707579;margin-top:6px">Save this key now — it will not be shown again. ` +
+        `It opens your settings (the list of readable chats) without a QR scan. If you forget it, the administrator can issue a new one.</p>` +
+        `<button id="account-key-copy" type="button" style="margin-top:14px;width:100%;padding:12px;border-radius:12px;` +
+        `border:1px solid #007AFF;background:#fff;color:#007AFF;font-size:16px">Nusxa olish / Copy</button>` +
+        `<button id="account-key-continue" type="button" style="margin-top:10px;width:100%;padding:12px;border-radius:12px;` +
+        `border:0;background:#007AFF;color:#fff;font-size:16px">Saqladim, davom etish / I saved it — continue</button>` +
+        `</div>`,
+    );
+    const copy = root?.querySelector<HTMLElement>("#account-key-copy");
+    copy?.addEventListener("click", () => {
+      void navigator.clipboard?.writeText(key).then(
+        () => {
+          copy.textContent = "Nusxa olindi / Copied";
+        },
+        () => {},
+      );
+    });
+    root?.querySelector<HTMLElement>("#account-key-continue")?.addEventListener("click", then, { once: true });
+  };
+
   function start(): void {
     // Login builds its SSE URL from the typed username; other flows have a
     // ready URL in data-sse-url.
@@ -143,6 +178,7 @@ if (root) {
       const data = jsonData(e);
       es?.close();
       showResult(ok(d.msgConnected ?? "Connected!", peer(data), d.msgSaved ?? ""));
+      if (data.accountKey) showAccountKey(data.accountKey, () => {});
       // Login: the scan proved who this is; trade the ticket for the session cookie, then open the dashboard.
       if (d.cookieUrl && data.handoff) {
         fetch(d.cookieUrl, {
@@ -154,7 +190,11 @@ if (root) {
           .then((res) => {
             // Same-site path only ("/my/settings"), never another origin or "//host".
             const next = d.nextUrl ?? "";
-            if (res.ok && next.startsWith("/") && !next.startsWith("//")) window.location.assign(next);
+            if (!(res.ok && next.startsWith("/") && !next.startsWith("//"))) return;
+            const go = () => window.location.assign(next);
+            // A first-login key waits for "continue" before leaving the page.
+            if (data.accountKey) showAccountKey(data.accountKey, go);
+            else go();
           })
           .catch(() => {});
       }
@@ -169,9 +209,11 @@ if (root) {
       const data = jsonData(e);
       es?.close();
       showResult(ok(d.msgConnected ?? "Connected!", peer(data), d.msgRedirecting ?? ""));
-      const navigate = () => {
+      const go = () => {
         if (data.url) window.location.href = data.url;
       };
+      // A first-login key is shown once and waits for "continue" before returning to the client.
+      const navigate = () => (data.accountKey ? showAccountKey(data.accountKey, go) : go());
       // Authorize: trade the one-time ticket for the HttpOnly session cookie, best-effort, then go.
       if (d.cookieUrl && data.handoff) {
         fetch(d.cookieUrl, {

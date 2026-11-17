@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { AccountKeys } from "../account-keys.js";
 import type { OAuthProvider } from "../oauth.js";
 import { LoginPage } from "../pages/LoginPage.js";
 import { handleQrLogin } from "../qr-login.js";
@@ -11,9 +12,11 @@ export interface LoginRoutesDeps {
   oauth: Pick<OAuthProvider, "createBrowserHandoff">;
   /** Access-key gate: only Telegram accounts bound to a listed key may sign in. */
   access?: { enabled: boolean; isTelegramIdAllowed(telegramId: string): boolean };
+  /** Open-signup mode: personal key made on an account's first QR login. */
+  accountKeys?: Pick<AccountKeys, "issue">;
 }
 
-export function createLoginRoutes({ sessions, oauth, access }: LoginRoutesDeps): Hono {
+export function createLoginRoutes({ sessions, oauth, access, accountKeys }: LoginRoutesDeps): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -34,7 +37,7 @@ export function createLoginRoutes({ sessions, oauth, access }: LoginRoutesDeps):
       return c.text("userId required", 400);
     }
 
-    const stream = await handleQrLogin(sessions, userId, c.req.raw.signal, oauth, access);
+    const stream = await handleQrLogin(sessions, userId, c.req.raw.signal, oauth, access, accountKeys);
 
     return new Response(stream, {
       headers: {

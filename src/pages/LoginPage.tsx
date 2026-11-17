@@ -40,6 +40,12 @@ const clientScript = `
         '<h2 style="color:#007AFF;font-size:20px;margin-bottom:8px">Connected!</h2>' +
         '<p>' + window.__esc(data.name || '') + ' (@' + window.__esc(data.username || 'unknown') + ')</p>' +
         '<p style="margin-top:12px;font-size:13px;color:#707579">Session saved. You can close this page.</p>' +
+        (data.accountKey
+          ? '<p style="margin-top:12px"><b>Shaxsiy kirish kalitingiz / Your personal access key:</b></p>' +
+            '<div style="font-family:monospace;font-size:22px;text-align:center;padding:12px;border:1px dashed #007AFF;border-radius:10px;user-select:all">' +
+            window.__esc(data.accountKey) + '</div>' +
+            '<p style="font-size:13px;color:#707579">Saqlab qo’ying — boshqa ko’rsatilmaydi. Save it — it will not be shown again.</p>'
+          : '') +
         '</div>';
     });
 

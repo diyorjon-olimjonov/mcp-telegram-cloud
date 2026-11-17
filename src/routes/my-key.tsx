@@ -1,6 +1,9 @@
 /**
- * `/my/key` — sign in to the website settings (/my/chats, /my/settings) with the
- * ACCESS KEY the operator handed out, instead of scanning a Telegram QR again.
+ * `/my/key` — sign in to the website settings (/my/chats, /my/settings) with an
+ * access key instead of scanning a Telegram QR again. Two kinds of key:
+ *  - gate mode (ACCESS_KEYS set): the key the operator handed out, once bound;
+ *  - open-signup mode: the personal key the server showed on the account's
+ *    first QR login (see account-keys.ts).
  *
  * The key only works once it is bound to a Telegram account (i.e. after the
  * person connected from Claude with it); it then signs the browser in as that
@@ -15,6 +18,7 @@ import { bodyLimit } from "hono/body-limit";
 import { css } from "hono/css";
 import type { FC } from "hono/jsx";
 import { type AccessGate, readCookie, safeEqual } from "../access-keys.js";
+import type { AccountKeys } from "../account-keys.js";
 import { config } from "../config.js";
 import { buildBrowserSessionCookie } from "../cookie-handler.js";
 import { logger, logUser } from "../logger.js";
@@ -32,6 +36,8 @@ const NEXT_PAGES = new Set(["/my/chats", "/my/settings"]);
 
 export interface MyKeyDeps {
   access: Pick<AccessGate, "enabled" | "verify" | "boundTelegramId" | "isBlocked" | "recordFailure">;
+  /** Open-signup mode (gate off): personal keys issued on first QR login. */
+  accountKeys?: Pick<AccountKeys, "verify">;
   sessions: Pick<SessionManager, "findUserIdByTelegramId" | "getSavedUserIds">;
   oauth: Pick<OAuthProvider, "createBrowserSession">;
   /** Where to go when `next` is missing or not allowed. */
@@ -78,9 +84,9 @@ export const MyKeyPage: FC<{ csrf: string; next: string; error?: KeyError }> = (
     <div class={card}>
       <h1 class={title}>Sozlamalarga kirish</h1>
       <p class={subtitle}>
-        Sozlamalarni o'zgartirish uchun sizga berilgan kirish kalitini kiriting.
+        Sozlamalarni o'zgartirish uchun kirish kalitingizni kiriting.
         <br />
-        <span class={en}>Enter the access key you were given to change your settings.</span>
+        <span class={en}>Enter your access key to change your settings.</span>
       </p>
       {props.error && (
         <p class={errorBox} role="alert">
@@ -134,7 +140,7 @@ export function createMyKeyRoutes(deps: MyKeyDeps): Hono {
   app.get("/key", (c) => page(c, safeNext(c.req.query("next"))));
 
   app.post("/key", bodyLimit({ maxSize: 4096 }), async (c) => {
-    if (!deps.access.enabled) return c.text("Not found", 404);
+    if (!deps.access.enabled && !deps.accountKeys) return c.text("Not found", 404);
     if (c.req.header("origin") !== config.issuer) return c.text("Forbidden", 403);
     const form = await c.req.parseBody().catch(() => null);
     const field = (name: string) => {
@@ -147,20 +153,23 @@ export function createMyKeyRoutes(deps: MyKeyDeps): Hono {
 
     const ip = getClientIp(c);
     if (deps.access.isBlocked(ip)) return page(c, next, "blocked");
-    const label = deps.access.verify(field("access_key").slice(0, 256));
-    if (!label) {
+    const typed = field("access_key").slice(0, 256);
+    // Gate mode: an operator key, then the account it is bound to. Open mode: the personal key's account.
+    const label = deps.access.enabled ? deps.access.verify(typed) : null;
+    const personal = deps.access.enabled ? null : (deps.accountKeys?.verify(typed) ?? null);
+    if (!label && !personal) {
       deps.access.recordFailure(ip);
       logger.warn("Settings sign-in: access key rejected", { component: "my", event: "my_key.rejected" });
       return page(c, next, "invalid");
     }
-    const telegramId = deps.access.boundTelegramId(label);
+    const telegramId = label ? deps.access.boundTelegramId(label) : personal;
     const userId = telegramId ? deps.sessions.findUserIdByTelegramId(telegramId) : null;
     if (!userId || !deps.sessions.getSavedUserIds().includes(userId)) return page(c, next, "not_connected");
 
     const token = deps.oauth.createBrowserSession(userId, KEY_SIGNIN_MAX_AGE_SECONDS);
     c.header("Set-Cookie", buildBrowserSessionCookie(token, KEY_SIGNIN_MAX_AGE_SECONDS), { append: true });
     c.header("Set-Cookie", csrfCookie("", 0), { append: true });
-    logger.info(`Settings sign-in with access key (${label})`, {
+    logger.info(`Settings sign-in with access key (${label ?? "personal key"})`, {
       component: "my",
       event: "my_key.accepted",
       userId: logUser(userId),

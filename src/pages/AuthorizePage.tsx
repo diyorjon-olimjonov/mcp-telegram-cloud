@@ -103,6 +103,21 @@ export const AuthorizePage: FC<AuthorizePageProps> = (props) => {
             // ignore — redirect is more important than the hint
           }
         }
+        if (data.accountKey) {
+          // First login in open-signup mode: show the personal key once, continue on click.
+          result.innerHTML =
+            '<div style="background:#F4F4F7;border:1px solid #007AFF;border-radius:12px;padding:20px;margin:20px 0">' +
+            '<h2 style="color:#007AFF;font-size:20px;margin-bottom:8px">Shaxsiy kirish kalitingiz / Your personal access key</h2>' +
+            '<div style="font-family:monospace;font-size:22px;text-align:center;padding:12px;border:1px dashed #007AFF;border-radius:10px;user-select:all">' +
+            window.__esc(data.accountKey) + '</div>' +
+            '<p style="margin-top:12px">Bu kalitni saqlab qo’ying — u boshqa ko’rsatilmaydi. Save this key now — it will not be shown again.</p>' +
+            '<button id="account-key-continue" style="margin-top:12px;width:100%;padding:12px;border:0;border-radius:12px;background:#007AFF;color:#fff;font-size:16px">Saqladim, davom etish / I saved it — continue</button>' +
+            '</div>';
+          document.getElementById('account-key-continue').addEventListener('click', () => {
+            window.location.href = data.url;
+          });
+          return;
+        }
         window.location.href = data.url;
       });
 

@@ -11,6 +11,7 @@ import {
   readCookie,
   safeEqual,
 } from "../access-keys.js";
+import type { AccountKeys } from "../account-keys.js";
 import { config } from "../config.js";
 import {
   buildBrowserSessionCookie,
@@ -39,6 +40,8 @@ export interface OAuthRoutesDeps {
   sessions: SessionManager;
   /** Access-key gate. Absent or disabled ⇒ no key step (upstream behavior). */
   access?: AccessGate;
+  /** Open-signup mode: personal key made on an account's first QR login. */
+  accountKeys?: Pick<AccountKeys, "issue">;
 }
 
 /** `Set-Cookie` for the access-key flow: scoped to /oauth, HttpOnly, Secure on https. */
@@ -173,7 +176,7 @@ export function createOAuthWellKnownRoutes(oauth: OAuthProvider): Hono {
   return app;
 }
 
-export function createOAuthRoutes({ oauth, sessions, access }: OAuthRoutesDeps): Hono {
+export function createOAuthRoutes({ oauth, sessions, access, accountKeys }: OAuthRoutesDeps): Hono {
   const app = new Hono();
 
   const gateOn = (): boolean => access?.enabled === true;
@@ -507,6 +510,7 @@ export function createOAuthRoutes({ oauth, sessions, access }: OAuthRoutesDeps):
       userIdHint,
       c.req.raw.signal,
       accessOpt,
+      accountKeys,
     );
 
     return new Response(stream, {
